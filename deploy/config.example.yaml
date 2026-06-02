@@ -213,6 +213,12 @@ gateway:
   # 默认 false：保持纯文本 Codex 请求不被改写；客户端显式提供 image_generation tool 时，
   # 仍会在分组允许图片生成的情况下正常转发。
   codex_image_generation_bridge_enabled: false
+  # Enable legacy OpenAI /responses payload transforms.
+  # 是否启用旧版 OpenAI /responses 请求/响应 payload 改写。
+  #
+  # Default false preserves client-provided system/instructions and tool call payloads.
+  # 默认 false：不自动改写客户端提供的 system/instructions，也不修正 tool call payload。
+  openai_responses_payload_transform_enabled: false
   # Optional: template file used to build the final top-level Codex `instructions`.
   # 可选：用于构建最终 Codex 顶层 `instructions` 的模板文件路径。
   #
@@ -987,6 +993,9 @@ pricing:
   # Fallback pricing file
   # 备用定价文件
   fallback_file: "./resources/model-pricing/model_prices_and_context_window.json"
+  # Custom pricing override file (highest priority, ignored when missing)
+  # 自定义价格覆盖文件（最高优先级，不存在时跳过）
+  custom_pricing_file: "./data/custom_model_prices.json"
   # Update interval in hours
   # 更新间隔（小时）
   update_interval_hours: 24

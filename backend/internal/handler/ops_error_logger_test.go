@@ -887,6 +887,12 @@ func TestParseOpsErrorResponsePreservesNestedStringCode(t *testing.T) {
 	require.Equal(t, "API Key 所属分组已删除", parsed.Message)
 }
 
+func TestClassifyOpsIsBusinessLimited_InsufficientCreditsBillingError(t *testing.T) {
+	require.True(t, classifyOpsIsBusinessLimited("billing_error", "request", "billing_error", http.StatusPaymentRequired, "Insufficient credits"))
+	require.True(t, classifyOpsIsBusinessLimited("billing_error", "request", "", http.StatusPaymentRequired, "insufficient credits"))
+	require.False(t, classifyOpsIsBusinessLimited("billing_error", "request", "", http.StatusPaymentRequired, "invalid payment method"))
+}
+
 func TestSetOpsEndpointContext_SetsContextKeys(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()

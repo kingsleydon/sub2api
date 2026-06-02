@@ -2226,7 +2226,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			if needModelReplace && len(mappedModelBytes) > 0 && openAIWSEventMayContainModel(eventType) && bytes.Contains(message, mappedModelBytes) {
 				message = replaceOpenAIWSMessageModel(message, mappedModel, originalModel)
 			}
-			if openAIWSEventMayContainToolCalls(eventType) && openAIWSMessageLikelyContainsToolCalls(message) {
+			if s.isOpenAIResponsesPayloadTransformEnabled() && openAIWSEventMayContainToolCalls(eventType) && openAIWSMessageLikelyContainsToolCalls(message) {
 				if corrected, changed := s.toolCorrector.CorrectToolCallsInSSEBytes(message); changed {
 					message = corrected
 				}
@@ -2361,7 +2361,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		if needModelReplace {
 			finalResponse = s.replaceModelInResponseBody(finalResponse, mappedModel, originalModel)
 		}
-		finalResponse = s.correctToolCallsInResponseBody(finalResponse)
+		if s.isOpenAIResponsesPayloadTransformEnabled() {
+			finalResponse = s.correctToolCallsInResponseBody(finalResponse)
+		}
 		populateOpenAIUsageFromResponseJSON(finalResponse, usage)
 		if responseID == "" {
 			responseID = strings.TrimSpace(gjson.GetBytes(finalResponse, "id").String())
@@ -3214,7 +3216,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				if needModelReplace && len(mappedModelBytes) > 0 && openAIWSEventMayContainModel(eventType) && bytes.Contains(upstreamMessage, mappedModelBytes) {
 					upstreamMessage = replaceOpenAIWSMessageModel(upstreamMessage, mappedModel, originalModel)
 				}
-				if openAIWSEventMayContainToolCalls(eventType) && openAIWSMessageLikelyContainsToolCalls(upstreamMessage) {
+				if s.isOpenAIResponsesPayloadTransformEnabled() && openAIWSEventMayContainToolCalls(eventType) && openAIWSMessageLikelyContainsToolCalls(upstreamMessage) {
 					if corrected, changed := s.toolCorrector.CorrectToolCallsInSSEBytes(upstreamMessage); changed {
 						upstreamMessage = corrected
 					}

@@ -870,17 +870,20 @@ func TestNormalizeCodexModel_Gpt53(t *testing.T) {
 
 func TestNormalizeCodexModel_RemovedModelsFallbackToSupportedTargets(t *testing.T) {
 	cases := map[string]string{
-		"":                   "gpt-5.4",
-		"gpt-5":              "gpt-5.4",
-		"gpt-5-mini":         "gpt-5.4",
-		"gpt-5-nano":         "gpt-5.4",
-		"gpt-5.1":            "gpt-5.4",
-		"gpt-5.1-codex":      "gpt-5.3-codex",
-		"gpt-5.1-codex-max":  "gpt-5.3-codex",
-		"gpt-5.1-codex-mini": "gpt-5.3-codex",
-		"gpt-5.2-codex":      "gpt-5.2",
-		"codex-mini-latest":  "gpt-5.3-codex",
-		"gpt-5-codex":        "gpt-5.3-codex",
+		"":                        "gpt-5.4",
+		"gpt-5":                   "gpt-5.4",
+		"gpt-5-mini":              "gpt-5.4",
+		"gpt-5-nano":              "gpt-5.4",
+		"gpt-5.1":                 "gpt-5.4",
+		"gpt-5.1-codex":           "gpt-5.3-codex",
+		"gpt-5.1-codex-high":      "gpt-5.3-codex",
+		"gpt-5.1-codex-max":       "gpt-5.3-codex",
+		"gpt-5.1-codex-mini":      "gpt-5.4-mini",
+		"gpt-5.1-codex-mini-high": "gpt-5.4-mini",
+		"openai/gpt5.1codexmini":  "gpt-5.4-mini",
+		"gpt-5.2-codex":           "gpt-5.2",
+		"codex-mini-latest":       "gpt-5.3-codex",
+		"gpt-5-codex":             "gpt-5.3-codex",
 	}
 
 	for input, expected := range cases {

@@ -46,3 +46,15 @@ func TestBuildOpsErrorLogsWhere_UserQueryUsesExistsSubquery(t *testing.T) {
 		t.Fatalf("where should include EXISTS user email condition: %s", where)
 	}
 }
+
+func TestBuildOpsErrorLogsWhere_DefaultErrorsViewExcludesBusinessLimited(t *testing.T) {
+	where, _ := buildOpsErrorLogsWhere(&service.OpsErrorLogFilter{})
+	if !strings.Contains(where, "COALESCE(e.is_business_limited,false) = false") {
+		t.Fatalf("default errors view should exclude business-limited rows: %s", where)
+	}
+
+	where, _ = buildOpsErrorLogsWhere(&service.OpsErrorLogFilter{View: "excluded"})
+	if !strings.Contains(where, "COALESCE(e.is_business_limited,false) = true") {
+		t.Fatalf("excluded view should include only business-limited rows: %s", where)
+	}
+}

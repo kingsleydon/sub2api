@@ -342,7 +342,7 @@ func opsErrorLogConfig() (workerCount int, queueSize int) {
 	return workerCount, queueSize
 }
 
-func setOpsRequestContext(c *gin.Context, model string, stream bool) {
+func setOpsRequestContext(c *gin.Context, model string, stream bool, _ ...[]byte) {
 	if c == nil {
 		return
 	}
@@ -1171,6 +1171,9 @@ func classifyOpsIsBusinessLimited(errType, phase, code string, status int, messa
 		return true
 	}
 	if isOpsLocalBusinessLimitError(code, strings.ToLower(message)) {
+		return true
+	}
+	if errType == "billing_error" && strings.Contains(strings.ToLower(message), "insufficient credits") {
 		return true
 	}
 	if phase == "billing" || phase == "concurrency" {

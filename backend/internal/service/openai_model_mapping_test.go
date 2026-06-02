@@ -268,6 +268,18 @@ func TestNormalizeOpenAIModelForUpstream(t *testing.T) {
 			want:    "codex-auto-review",
 		},
 		{
+			name:    "oauth maps delisted codex 5.1 to 5.3 codex",
+			account: &Account{Type: AccountTypeOAuth},
+			model:   "gpt-5.1-codex",
+			want:    "gpt-5.3-codex",
+		},
+		{
+			name:    "oauth maps delisted codex 5.1 mini to 5.4 mini",
+			account: &Account{Type: AccountTypeOAuth},
+			model:   "gpt-5.1-codex-mini",
+			want:    "gpt-5.4-mini",
+		},
+		{
 			name:    "apikey preserves custom compatible model",
 			account: &Account{Type: AccountTypeAPIKey},
 			model:   "gemini-3-flash-preview",

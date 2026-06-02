@@ -4,6 +4,8 @@ package service
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -350,6 +352,7 @@ func TestGetFallbackPricing_FamilyMatching(t *testing.T) {
 		{name: "openai gpt5.3 codex spark", model: "gpt-5.3-codex-spark", expectedInput: 1.5e-6},
 		{name: "openai legacy gpt5.1 falls back to gpt5.4", model: "gpt-5.1", expectedInput: 2.5e-6},
 		{name: "openai legacy gpt5.1 codex falls back to gpt5.3 codex", model: "gpt-5.1-codex", expectedInput: 1.5e-6},
+		{name: "openai legacy gpt5.1 codex mini falls back to gpt5.4 mini", model: "gpt-5.1-codex-mini-high", expectedInput: 7.5e-7},
 		{name: "openai legacy codex mini latest falls back to gpt5.3 codex", model: "codex-mini-latest", expectedInput: 1.5e-6},
 		{name: "openai unknown no fallback", model: "gpt-unknown-model", expectNilPricing: true},
 		{name: "non supported family", model: "qwen-max", expectNilPricing: true},
@@ -733,6 +736,66 @@ func TestBillingServiceGetModelPricing_UsesDynamicPriorityFields(t *testing.T) {
 	require.Equal(t, 272000, pricing.LongContextInputThreshold)
 	require.InDelta(t, 2.0, pricing.LongContextInputMultiplier, 1e-12)
 	require.InDelta(t, 1.5, pricing.LongContextOutputMultiplier, 1e-12)
+}
+
+func TestBillingServiceGetModelPricing_UsesCustomPricingFileBeforeDynamicAndFallback(t *testing.T) {
+	dir := t.TempDir()
+	customFile := filepath.Join(dir, "custom_model_prices.json")
+	err := os.WriteFile(customFile, []byte(`{
+		"Kimi-For-Coding-Thinking": {
+			"input_cost_per_token": 0.00000045,
+			"output_cost_per_token": 0.0000022,
+			"cache_creation_input_token_cost": 0,
+			"cache_read_input_token_cost": 0.000000225
+		}
+	}`), 0o600)
+	require.NoError(t, err)
+
+	svc := NewBillingService(&config.Config{
+		Pricing: config.PricingConfig{CustomPricingFile: customFile},
+	}, &PricingService{
+		pricingData: map[string]*LiteLLMModelPricing{
+			"kimi-for-coding-thinking": {
+				InputCostPerToken:       99e-6,
+				OutputCostPerToken:      99e-6,
+				CacheReadInputTokenCost: 99e-6,
+			},
+		},
+	})
+
+	pricing, err := svc.GetModelPricing("kimi-for-coding-thinking")
+	require.NoError(t, err)
+	require.InDelta(t, 0.45e-6, pricing.InputPricePerToken, 1e-12)
+	require.InDelta(t, 2.2e-6, pricing.OutputPricePerToken, 1e-12)
+	require.InDelta(t, 0.225e-6, pricing.CacheReadPricePerToken, 1e-12)
+}
+
+func TestCalculateCost_CustomKimiThinkingPricing(t *testing.T) {
+	dir := t.TempDir()
+	customFile := filepath.Join(dir, "custom_model_prices.json")
+	err := os.WriteFile(customFile, []byte(`{
+		"kimi-for-coding-thinking": {
+			"input_cost_per_token": 0.00000045,
+			"output_cost_per_token": 0.0000022,
+			"cache_creation_input_token_cost": 0,
+			"cache_read_input_token_cost": 0.000000225
+		}
+	}`), 0o600)
+	require.NoError(t, err)
+
+	svc := NewBillingService(&config.Config{
+		Pricing: config.PricingConfig{CustomPricingFile: customFile},
+	}, &PricingService{})
+
+	cost, err := svc.CalculateCost("kimi-for-coding-thinking", UsageTokens{
+		InputTokens:     1000,
+		OutputTokens:    2000,
+		CacheReadTokens: 3000,
+	}, 1.0)
+	require.NoError(t, err)
+	require.InDelta(t, 1000*0.45e-6, cost.InputCost, 1e-12)
+	require.InDelta(t, 2000*2.2e-6, cost.OutputCost, 1e-12)
+	require.InDelta(t, 3000*0.225e-6, cost.CacheReadCost, 1e-12)
 }
 
 func TestBillingServiceGetModelPricing_OpenAIFallbackGpt52Variants(t *testing.T) {

@@ -224,6 +224,7 @@ func TestOpenAIGatewayService_Forward_WSv2_UsesPatchedBodyAfterValidationDecode(
 	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
 	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 30
 	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 10
+	cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 
 	svc := &OpenAIGatewayService{
 		cfg:              cfg,
@@ -400,72 +401,86 @@ func TestLogOpenAIWSBindResponseAccountWarn(t *testing.T) {
 func TestOpenAIGatewayService_Forward_WSv2_RewriteModelAndToolCallsOnCompletedEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
-	c.Request.Header.Set("User-Agent", "codex_cli_rs/0.98.0")
-	groupID := int64(3001)
-	c.Set("api_key", &APIKey{GroupID: &groupID})
-
-	cfg := &config.Config{}
-	cfg.Security.URLAllowlist.Enabled = false
-	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
-	cfg.Gateway.OpenAIWS.Enabled = true
-	cfg.Gateway.OpenAIWS.OAuthEnabled = true
-	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
-	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
-	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
-	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
-	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
-	cfg.Gateway.OpenAIWS.QueueLimitPerConn = 8
-	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
-	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 5
-	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
-
-	captureConn := &openAIWSCaptureConn{
-		events: [][]byte{
-			[]byte(`{"type":"response.completed","response":{"id":"resp_model_tool_1","model":"gpt-5.1","tool_calls":[{"function":{"name":"apply_patch","arguments":"{\"file_path\":\"/tmp/a.txt\",\"old_string\":\"a\",\"new_string\":\"b\"}"}}],"usage":{"input_tokens":2,"output_tokens":1}},"tool_calls":[{"function":{"name":"apply_patch","arguments":"{\"file_path\":\"/tmp/a.txt\",\"old_string\":\"a\",\"new_string\":\"b\"}"}}]}`),
-		},
-	}
-	captureDialer := &openAIWSCaptureDialer{conn: captureConn}
-	pool := newOpenAIWSConnPool(cfg)
-	pool.setClientDialerForTest(captureDialer)
-
-	svc := &OpenAIGatewayService{
-		cfg:              cfg,
-		httpUpstream:     &httpUpstreamRecorder{},
-		cache:            &stubGatewayCache{},
-		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
-		toolCorrector:    NewCodexToolCorrector(),
-		openaiWSPool:     pool,
+	tests := []struct {
+		name                    string
+		payloadTransformEnabled bool
+		wantToolName            string
+	}{
+		{name: "default preserves tool calls", wantToolName: "apply_patch"},
+		{name: "legacy transform rewrites tool calls", payloadTransformEnabled: true, wantToolName: "edit"},
 	}
 
-	account := &Account{
-		ID:          1301,
-		Name:        "openai-rewrite",
-		Platform:    PlatformOpenAI,
-		Type:        AccountTypeAPIKey,
-		Status:      StatusActive,
-		Schedulable: true,
-		Concurrency: 1,
-		Credentials: map[string]any{
-			"api_key": "sk-test",
-			"model_mapping": map[string]any{
-				"custom-original-model": "gpt-5.1",
-			},
-		},
-		Extra: map[string]any{
-			"responses_websockets_v2_enabled": true,
-		},
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+			c.Request.Header.Set("User-Agent", "codex_cli_rs/0.98.0")
+			groupID := int64(3001)
+			c.Set("api_key", &APIKey{GroupID: &groupID})
 
-	body := []byte(`{"model":"custom-original-model","stream":false,"input":[{"type":"input_text","text":"hello"}]}`)
-	result, err := svc.Forward(context.Background(), c, account, body)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.Equal(t, "resp_model_tool_1", result.RequestID)
-	require.Equal(t, "custom-original-model", gjson.GetBytes(rec.Body.Bytes(), "model").String(), "响应模型应回写为原始请求模型")
-	require.Equal(t, "edit", gjson.GetBytes(rec.Body.Bytes(), "tool_calls.0.function.name").String(), "工具名称应被修正为 OpenCode 规范")
+			cfg := &config.Config{}
+			cfg.Security.URLAllowlist.Enabled = false
+			cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+			cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = tt.payloadTransformEnabled
+			cfg.Gateway.OpenAIWS.Enabled = true
+			cfg.Gateway.OpenAIWS.OAuthEnabled = true
+			cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+			cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+			cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+			cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+			cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+			cfg.Gateway.OpenAIWS.QueueLimitPerConn = 8
+			cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
+			cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 5
+			cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
+
+			captureConn := &openAIWSCaptureConn{
+				events: [][]byte{
+					[]byte(`{"type":"response.completed","response":{"id":"resp_model_tool_1","model":"gpt-5.1","tool_calls":[{"function":{"name":"apply_patch","arguments":"{\"file_path\":\"/tmp/a.txt\",\"old_string\":\"a\",\"new_string\":\"b\"}"}}],"usage":{"input_tokens":2,"output_tokens":1}},"tool_calls":[{"function":{"name":"apply_patch","arguments":"{\"file_path\":\"/tmp/a.txt\",\"old_string\":\"a\",\"new_string\":\"b\"}"}}]}`),
+				},
+			}
+			captureDialer := &openAIWSCaptureDialer{conn: captureConn}
+			pool := newOpenAIWSConnPool(cfg)
+			pool.setClientDialerForTest(captureDialer)
+
+			svc := &OpenAIGatewayService{
+				cfg:              cfg,
+				httpUpstream:     &httpUpstreamRecorder{},
+				cache:            &stubGatewayCache{},
+				openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
+				toolCorrector:    NewCodexToolCorrector(),
+				openaiWSPool:     pool,
+			}
+
+			account := &Account{
+				ID:          1301,
+				Name:        "openai-rewrite",
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeAPIKey,
+				Status:      StatusActive,
+				Schedulable: true,
+				Concurrency: 1,
+				Credentials: map[string]any{
+					"api_key": "sk-test",
+					"model_mapping": map[string]any{
+						"custom-original-model": "gpt-5.1",
+					},
+				},
+				Extra: map[string]any{
+					"responses_websockets_v2_enabled": true,
+				},
+			}
+
+			body := []byte(`{"model":"custom-original-model","stream":false,"input":[{"type":"input_text","text":"hello"}]}`)
+			result, err := svc.Forward(context.Background(), c, account, body)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, "resp_model_tool_1", result.RequestID)
+			require.Equal(t, "custom-original-model", gjson.GetBytes(rec.Body.Bytes(), "model").String(), "响应模型应回写为原始请求模型")
+			require.Equal(t, tt.wantToolName, gjson.GetBytes(rec.Body.Bytes(), "tool_calls.0.function.name").String())
+		})
+	}
 }
 
 func TestOpenAIWSPayloadString_OnlyAcceptsStringValues(t *testing.T) {
@@ -593,7 +608,7 @@ func TestOpenAIGatewayService_Forward_WSv2_PoolReuseNotOneToOne(t *testing.T) {
 	require.GreaterOrEqual(t, metrics.ConnPickTotal, int64(1))
 }
 
-func TestOpenAIGatewayService_Forward_WSv2_OAuthStoreFalseByDefault(t *testing.T) {
+func TestOpenAIGatewayService_Forward_WSv2_OAuthStoreFalsePreservesStreamByDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
@@ -659,7 +674,7 @@ func TestOpenAIGatewayService_Forward_WSv2_OAuthStoreFalseByDefault(t *testing.T
 	require.True(t, gjson.Get(requestJSON, "store").Exists(), "OAuth WSv2 应显式写入 store 字段")
 	require.False(t, gjson.Get(requestJSON, "store").Bool(), "默认策略应将 OAuth store 置为 false")
 	require.True(t, gjson.Get(requestJSON, "stream").Exists(), "WSv2 payload 应保留 stream 字段")
-	require.True(t, gjson.Get(requestJSON, "stream").Bool(), "OAuth Codex 规范化后应强制 stream=true")
+	require.False(t, gjson.Get(requestJSON, "stream").Bool(), "默认关闭 payload transform 时应保留客户端 stream=false")
 	require.Equal(t, openAIWSBetaV2Value, captureDialer.lastHeaders.Get("OpenAI-Beta"))
 	// OAuth 账号的 session_id/conversation_id 应被 isolateOpenAISessionID 隔离，
 	// 测试中未设置 api_key 到 context，apiKeyID=0。

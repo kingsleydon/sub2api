@@ -91,6 +91,7 @@ func TestOpenAIGatewayService_Forward_PreservePreviousResponseIDWhenWSEnabled(t 
 	cfg.Gateway.OpenAIWS.OAuthEnabled = true
 	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
 	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 
 	svc := &OpenAIGatewayService{
 		cfg:              cfg,
@@ -150,6 +151,7 @@ func TestOpenAIGatewayService_Forward_HTTPIngressStaysHTTPWhenWSEnabled(t *testi
 	cfg.Gateway.OpenAIWS.OAuthEnabled = true
 	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
 	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 
 	svc := &OpenAIGatewayService{
 		cfg:              cfg,
@@ -225,6 +227,7 @@ func TestOpenAIGatewayService_Forward_HTTPIngressRetriesInvalidEncryptedContentO
 	cfg.Gateway.OpenAIWS.OAuthEnabled = true
 	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
 	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 
 	svc := &OpenAIGatewayService{
 		cfg:              cfg,
@@ -383,6 +386,7 @@ func TestOpenAIGatewayService_Forward_RemovePreviousResponseIDWhenWSDisabled(t *
 	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
 	cfg.Gateway.OpenAIWS.Enabled = false
 	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 
 	svc := &OpenAIGatewayService{
 		cfg:              cfg,

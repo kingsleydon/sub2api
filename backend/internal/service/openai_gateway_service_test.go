@@ -334,6 +334,105 @@ func TestOpenAIGatewayService_GenerateSessionHash_EmptyBodyStillEmpty(t *testing
 	require.Empty(t, svc.GenerateSessionHash(c, nil))
 }
 
+func TestOpenAIForwardEmbeddings_UsesEmbeddingsEndpointAndParsesUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := `{"model":"text-embedding-3-small","input":"hello"}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("Accept", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}, "X-Request-Id": []string{"rid_embed"}},
+		Body: io.NopCloser(strings.NewReader(
+			`{"object":"list","data":[{"object":"embedding","embedding":[0.1],"index":0}],"model":"provider-embed-small","usage":{"prompt_tokens":7,"total_tokens":7}}`,
+		)),
+	}}
+	svc := &OpenAIGatewayService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+	}
+
+	account := &Account{
+		ID:          9,
+		Name:        "embed-provider",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://example.com/openai",
+			"model_mapping": map[string]any{
+				"text-embedding-3-small": "provider-embed-small",
+			},
+		},
+	}
+
+	result, err := svc.ForwardEmbeddings(c.Request.Context(), c, account, []byte(body), "")
+	require.NoError(t, err)
+	require.Equal(t, "https://example.com/openai/v1/embeddings", upstream.lastReq.URL.String())
+	require.Contains(t, string(upstream.lastBody), `"model":"provider-embed-small"`)
+	require.NotNil(t, result)
+	require.Equal(t, "rid_embed", result.RequestID)
+	require.Equal(t, "text-embedding-3-small", result.Model)
+	require.Equal(t, "provider-embed-small", result.UpstreamModel)
+	require.Equal(t, 7, result.Usage.InputTokens)
+	require.Zero(t, result.Usage.OutputTokens)
+	require.Contains(t, rec.Body.String(), `"model":"provider-embed-small"`)
+}
+
+func TestOpenAIForwardEmbeddings_UsesOfficialEndpointWhenBaseURLUnset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := `{"model":"text-embedding-3-small","input":"hello"}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: io.NopCloser(strings.NewReader(
+			`{"object":"list","data":[{"object":"embedding","embedding":[0.1],"index":0}],"model":"text-embedding-3-small","usage":{"prompt_tokens":7,"total_tokens":7}}`,
+		)),
+	}}
+	svc := &OpenAIGatewayService{
+		cfg:          &config.Config{},
+		httpUpstream: upstream,
+	}
+	account := &Account{
+		ID:          10,
+		Name:        "official-openai",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key": "sk-test",
+			"model_mapping": map[string]any{
+				"text-embedding-3-small": "text-embedding-3-small",
+			},
+		},
+	}
+
+	_, err := svc.ForwardEmbeddings(c.Request.Context(), c, account, []byte(body), "")
+	require.NoError(t, err)
+	require.Equal(t, openaiPlatformEmbedURL, upstream.lastReq.URL.String())
+}
+
+func TestBuildOpenAIEmbeddingsURL_NormalizesBaseURL(t *testing.T) {
+	require.Equal(t, "https://example.com/v1/embeddings", buildOpenAIEmbeddingsURL("https://example.com"))
+	require.Equal(t, "https://example.com/openai/v1/embeddings", buildOpenAIEmbeddingsURL("https://example.com/openai/v1"))
+	require.Equal(t, "https://example.com/openai/v1/embeddings", buildOpenAIEmbeddingsURL("https://example.com/openai/v1/embeddings"))
+}
+
 func (c stubConcurrencyCache) GetAccountWaitingCount(ctx context.Context, accountID int64) (int, error) {
 	if c.waitCounts != nil {
 		if count, ok := c.waitCounts[accountID]; ok {
@@ -567,6 +666,89 @@ func TestOpenAISelectAccountForModelWithExclusions_NoModelSupport(t *testing.T) 
 	if !strings.Contains(err.Error(), "supporting model") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func TestOpenAISelectEmbeddingAccountWithLoadAwareness_RequiresExplicitAPIKeySupport(t *testing.T) {
+	groupID := int64(1)
+	repo := stubOpenAIAccountRepo{
+		accounts: []Account{
+			{
+				ID:          1,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeAPIKey,
+				Status:      StatusActive,
+				Schedulable: true,
+				Concurrency: 1,
+				Priority:    0,
+			},
+			{
+				ID:          2,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeAPIKey,
+				Status:      StatusActive,
+				Schedulable: true,
+				Concurrency: 1,
+				Priority:    5,
+				Credentials: map[string]any{
+					"model_mapping": map[string]any{
+						"text-embedding-3-small": "text-embedding-3-small",
+					},
+				},
+			},
+			{
+				ID:          3,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeOAuth,
+				Status:      StatusActive,
+				Schedulable: true,
+				Concurrency: 1,
+				Priority:    1,
+				Credentials: map[string]any{
+					"model_mapping": map[string]any{
+						"text-embedding-3-small": "text-embedding-3-small",
+					},
+				},
+			},
+		},
+	}
+
+	svc := &OpenAIGatewayService{
+		accountRepo:        repo,
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+
+	selection, err := svc.SelectEmbeddingAccountWithLoadAwareness(context.Background(), &groupID, "text-embedding-3-small", nil)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, int64(2), selection.Account.ID)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAISelectEmbeddingAccountWithLoadAwareness_NoExplicitSupport(t *testing.T) {
+	groupID := int64(1)
+	repo := stubOpenAIAccountRepo{
+		accounts: []Account{
+			{
+				ID:          1,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeAPIKey,
+				Status:      StatusActive,
+				Schedulable: true,
+				Concurrency: 1,
+				Priority:    0,
+			},
+		},
+	}
+
+	svc := &OpenAIGatewayService{accountRepo: repo}
+
+	selection, err := svc.SelectEmbeddingAccountWithLoadAwareness(context.Background(), &groupID, "text-embedding-3-small", nil)
+	require.Error(t, err)
+	require.Nil(t, selection)
+	require.Contains(t, err.Error(), "embedding accounts")
 }
 
 func TestOpenAISelectAccountWithLoadAwareness_LoadBatchErrorFallback(t *testing.T) {

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -165,6 +167,9 @@ type BillingService struct {
 	cfg            *config.Config
 	pricingService *PricingService
 	fallbackPrices map[string]*ModelPricing // 硬编码回退价格
+	customPrices   map[string]*LiteLLMModelPricing
+	customMu       sync.RWMutex
+	customModTime  time.Time
 }
 
 // NewBillingService 创建计费服务实例
@@ -178,7 +183,73 @@ func NewBillingService(cfg *config.Config, pricingService *PricingService) *Bill
 	// 初始化硬编码回退价格（当动态价格不可用时使用）
 	s.initFallbackPricing()
 
+	s.loadCustomPricing()
+	s.startCustomPricingReloader()
+
 	return s
+}
+
+// loadCustomPricing 从自定义价格文件加载覆盖价格。
+func (s *BillingService) loadCustomPricing() {
+	if s == nil || s.cfg == nil {
+		return
+	}
+	filePath := strings.TrimSpace(s.cfg.Pricing.CustomPricingFile)
+	if filePath == "" {
+		return
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[Billing] Failed to stat custom pricing file: %v", err)
+		}
+		return
+	}
+	if !info.ModTime().After(s.customModTime) {
+		return
+	}
+
+	if s.pricingService == nil {
+		log.Printf("[Billing] Cannot parse custom pricing: pricing service not available")
+		return
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		log.Printf("[Billing] Failed to read custom pricing file: %v", err)
+		return
+	}
+
+	parsed, err := s.pricingService.parsePricingData(data)
+	if err != nil {
+		log.Printf("[Billing] Failed to parse custom pricing file: %v", err)
+		return
+	}
+	normalized := make(map[string]*LiteLLMModelPricing, len(parsed))
+	for model, pricing := range parsed {
+		normalized[strings.ToLower(strings.TrimSpace(model))] = pricing
+	}
+
+	s.customMu.Lock()
+	s.customPrices = normalized
+	s.customModTime = info.ModTime()
+	s.customMu.Unlock()
+
+	log.Printf("[Billing] Loaded %d custom model price overrides from %s", len(normalized), filePath)
+}
+
+func (s *BillingService) startCustomPricingReloader() {
+	if s == nil || s.cfg == nil || strings.TrimSpace(s.cfg.Pricing.CustomPricingFile) == "" {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			s.loadCustomPricing()
+		}
+	}()
 }
 
 // initFallbackPricing 初始化硬编码回退价格（当动态价格不可用时使用）
@@ -367,38 +438,27 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 // GetModelPricing 获取模型价格配置
 func (s *BillingService) GetModelPricing(model string) (*ModelPricing, error) {
 	// 标准化模型名称（转小写）
-	model = strings.ToLower(model)
+	model = strings.ToLower(strings.TrimSpace(model))
 
-	// 1. 优先从动态价格服务获取
-	if s.pricingService != nil {
-		litellmPricing := s.pricingService.GetModelPricing(model)
-		if litellmPricing != nil {
-			// 启用 5m/1h 分类计费的条件：
-			// 1. 存在 1h 价格
-			// 2. 1h 价格 > 5m 价格（防止 LiteLLM 数据错误导致少收费）
-			price5m := litellmPricing.CacheCreationInputTokenCost
-			price1h := litellmPricing.CacheCreationInputTokenCostAbove1hr
-			enableBreakdown := price1h > 0 && price1h > price5m
-			return s.applyModelSpecificPricingPolicy(model, &ModelPricing{
-				InputPricePerToken:             litellmPricing.InputCostPerToken,
-				InputPricePerTokenPriority:     litellmPricing.InputCostPerTokenPriority,
-				OutputPricePerToken:            litellmPricing.OutputCostPerToken,
-				OutputPricePerTokenPriority:    litellmPricing.OutputCostPerTokenPriority,
-				CacheCreationPricePerToken:     litellmPricing.CacheCreationInputTokenCost,
-				CacheReadPricePerToken:         litellmPricing.CacheReadInputTokenCost,
-				CacheReadPricePerTokenPriority: litellmPricing.CacheReadInputTokenCostPriority,
-				CacheCreation5mPrice:           price5m,
-				CacheCreation1hPrice:           price1h,
-				SupportsCacheBreakdown:         enableBreakdown,
-				LongContextInputThreshold:      litellmPricing.LongContextInputTokenThreshold,
-				LongContextInputMultiplier:     litellmPricing.LongContextInputCostMultiplier,
-				LongContextOutputMultiplier:    litellmPricing.LongContextOutputCostMultiplier,
-				ImageOutputPricePerToken:       litellmPricing.OutputCostPerImageToken,
-			}), nil
+	// 1. 优先从自定义价格覆盖获取（精确匹配）
+	s.customMu.RLock()
+	customData := s.customPrices
+	s.customMu.RUnlock()
+	if customData != nil {
+		if cp, ok := customData[model]; ok {
+			return s.applyModelSpecificPricingPolicy(model, modelPricingFromLiteLLM(cp)), nil
 		}
 	}
 
-	// 2. 使用硬编码回退价格
+	// 2. 从动态价格服务获取
+	if s.pricingService != nil {
+		litellmPricing := s.pricingService.GetModelPricing(model)
+		if litellmPricing != nil {
+			return s.applyModelSpecificPricingPolicy(model, modelPricingFromLiteLLM(litellmPricing)), nil
+		}
+	}
+
+	// 3. 使用硬编码回退价格
 	fallback := s.getFallbackPricing(model)
 	if fallback != nil {
 		log.Printf("[Billing] Using fallback pricing for model: %s", model)
@@ -406,6 +466,31 @@ func (s *BillingService) GetModelPricing(model string) (*ModelPricing, error) {
 	}
 
 	return nil, fmt.Errorf("%w for model: %s", ErrModelPricingUnavailable, model)
+}
+
+func modelPricingFromLiteLLM(p *LiteLLMModelPricing) *ModelPricing {
+	if p == nil {
+		return nil
+	}
+	price5m := p.CacheCreationInputTokenCost
+	price1h := p.CacheCreationInputTokenCostAbove1hr
+	enableBreakdown := price1h > 0 && price1h > price5m
+	return &ModelPricing{
+		InputPricePerToken:             p.InputCostPerToken,
+		InputPricePerTokenPriority:     p.InputCostPerTokenPriority,
+		OutputPricePerToken:            p.OutputCostPerToken,
+		OutputPricePerTokenPriority:    p.OutputCostPerTokenPriority,
+		CacheCreationPricePerToken:     p.CacheCreationInputTokenCost,
+		CacheReadPricePerToken:         p.CacheReadInputTokenCost,
+		CacheReadPricePerTokenPriority: p.CacheReadInputTokenCostPriority,
+		CacheCreation5mPrice:           price5m,
+		CacheCreation1hPrice:           price1h,
+		SupportsCacheBreakdown:         enableBreakdown,
+		LongContextInputThreshold:      p.LongContextInputTokenThreshold,
+		LongContextInputMultiplier:     p.LongContextInputCostMultiplier,
+		LongContextOutputMultiplier:    p.LongContextOutputCostMultiplier,
+		ImageOutputPricePerToken:       p.OutputCostPerImageToken,
+	}
 }
 
 // GetModelPricingWithChannel 获取模型定价，渠道配置的价格覆盖默认值

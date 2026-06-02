@@ -46,7 +46,7 @@ func checkBillingEligibility(
 		}
 		return nil
 	}
-	if err := billingCache.CheckBillingEligibility(c.Request.Context(), user, apiKey, group, subscription); err != nil {
+	if err := billingCache.CheckBillingEligibility(c.Request.Context(), user, apiKey, group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
 		status, code, message, retryAfter := billingErrorDetails(err)
 		return &BillingCheckResult{Status: status, Code: code, Message: message, RetryAfter: retryAfter, Err: err}
 	}

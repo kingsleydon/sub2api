@@ -544,6 +544,8 @@ type PricingConfig struct {
 	UpdateIntervalHours int `mapstructure:"update_interval_hours"`
 	// 哈希校验间隔（分钟）
 	HashCheckIntervalMinutes int `mapstructure:"hash_check_interval_minutes"`
+	// 自定义价格覆盖文件路径（优先级最高，文件不存在时静默跳过）
+	CustomPricingFile string `mapstructure:"custom_pricing_file"`
 }
 
 type ServerConfig struct {
@@ -732,6 +734,9 @@ type GatewayConfig struct {
 	// CodexImageGenerationBridgeEnabled: 是否为 Codex `/v1/responses` 自动注入 image_generation 工具和桥接指令。
 	// 默认关闭，避免纯文本 Codex 请求被意外改写；显式携带 image_generation 工具的请求仍按分组能力转发。
 	CodexImageGenerationBridgeEnabled bool `mapstructure:"codex_image_generation_bridge_enabled"`
+	// OpenAIResponsesPayloadTransformEnabled: 是否启用 OpenAI `/v1/responses` 请求体语义改写。
+	// 默认关闭，避免网关改写 system/instructions 或工具调用；开启后恢复旧的 Codex OAuth 兼容 transform。
+	OpenAIResponsesPayloadTransformEnabled bool `mapstructure:"openai_responses_payload_transform_enabled"`
 	// ForcedCodexInstructionsTemplateFile: 服务端强制附加到 Codex 顶层 instructions 的模板文件路径。
 	// 模板渲染后会直接覆盖最终 instructions；若需要保留客户端 system 转换结果，请在模板中显式引用 {{ .ExistingInstructions }}。
 	ForcedCodexInstructionsTemplateFile string `mapstructure:"forced_codex_instructions_template_file"`
@@ -1772,6 +1777,7 @@ func setDefaults() {
 	viper.SetDefault("pricing.hash_url", "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.sha256")
 	viper.SetDefault("pricing.data_dir", "./data")
 	viper.SetDefault("pricing.fallback_file", "./resources/model-pricing/model_prices_and_context_window.json")
+	viper.SetDefault("pricing.custom_pricing_file", "./data/custom_model_prices.json")
 	viper.SetDefault("pricing.update_interval_hours", 24)
 	viper.SetDefault("pricing.hash_check_interval_minutes", 10)
 
@@ -1839,6 +1845,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.max_account_switches_gemini", 3)
 	viper.SetDefault("gateway.force_codex_cli", false)
 	viper.SetDefault("gateway.codex_image_generation_bridge_enabled", false)
+	viper.SetDefault("gateway.openai_responses_payload_transform_enabled", false)
 	viper.SetDefault("gateway.openai_passthrough_allow_timeout_headers", false)
 	// OpenAI Responses WebSocket（默认开启；可通过 force_http 紧急回滚）
 	viper.SetDefault("gateway.openai_ws.enabled", true)

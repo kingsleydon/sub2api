@@ -88,6 +88,7 @@ func TestOpenAIGatewayService_Forward_HTTPPatchPathKeepsLargeInputRaw(t *testing
 	}
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
 	account := &Account{
 		ID:          1,
@@ -126,6 +127,7 @@ func TestOpenAIGatewayService_Forward_DecodedMutationKeepsLaterFieldDeletes(t *t
 	}
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
 	account := &Account{
 		ID:          2,
@@ -280,6 +282,7 @@ func TestOpenAIGatewayService_Forward_ImageToolWithImageOnlyModelIsNormalized(t 
 	}
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
 	account := &Account{
 		ID:          11,
@@ -404,6 +407,7 @@ func TestOpenAIGatewayService_Forward_CodexBridgeInjectionSetsImageBilling(t *te
 	cfg.Security.URLAllowlist.Enabled = false
 	cfg.Gateway.ForceCodexCLI = true
 	cfg.Gateway.CodexImageGenerationBridgeEnabled = true
+	cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
 	account := &Account{
 		ID:          7,
@@ -436,6 +440,7 @@ func TestOpenAIGatewayService_Forward_HTTPDeletesPreviousResponseIDWhenPresent(t
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 	account := &Account{
 		ID:          8,
 		Name:        "openai-apikey",
@@ -502,6 +507,7 @@ func TestOpenAIGatewayService_Forward_ImageOnlyModelKeepsSupportedVerbosity(t *t
 	}
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
 	account := &Account{
 		ID:          6,

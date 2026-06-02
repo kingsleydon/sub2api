@@ -102,6 +102,136 @@ func TestOpenAIGatewayService_ResponsesUnknownModelDoesNotFallbackToGPT54(t *tes
 	require.True(t, rec.Code >= http.StatusBadRequest)
 }
 
+func TestOpenAIGatewayService_CodexOAuthDefaultsToPassthrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(nil))
+	c.Request.Header.Set("User-Agent", "codex_cli_rs/0.135.0")
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	originalBody := []byte(`{"model":"gpt-5.5","stream":false,"instructions":"keep this exactly","input":[{"type":"text","text":"hi"}]}`)
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_passthrough_default"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"resp_1","usage":{"input_tokens":1,"output_tokens":2}}`)),
+	}}
+	svc := &OpenAIGatewayService{
+		cfg:          &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
+		httpUpstream: upstream,
+	}
+	account := &Account{
+		ID:             123,
+		Name:           "acc",
+		Platform:       PlatformOpenAI,
+		Type:           AccountTypeOAuth,
+		Concurrency:    1,
+		Credentials:    map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+		Status:         StatusActive,
+		Schedulable:    true,
+		RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, originalBody)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, chatgptCodexURL, upstream.lastReq.URL.String())
+	require.Equal(t, originalBody, upstream.lastBody)
+	require.Equal(t, "Bearer oauth-token", upstream.lastReq.Header.Get("Authorization"))
+	require.Equal(t, "chatgpt-acc", upstream.lastReq.Header.Get("chatgpt-account-id"))
+	require.Equal(t, "codex_cli_rs/0.135.0", upstream.lastReq.Header.Get("User-Agent"))
+	passthrough, ok := c.Get("openai_passthrough")
+	require.True(t, ok)
+	require.Equal(t, true, passthrough)
+}
+
+func TestOpenAIGatewayService_CodexResponsesPathDefaultsToPassthrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/codex/responses", bytes.NewReader(nil))
+	c.Request.Header.Set("User-Agent", "curl/8.0")
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	originalBody := []byte(`{"model":"gpt-5.5","stream":false,"instructions":"codex route","input":[{"type":"text","text":"hi"}]}`)
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_codex_path"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"resp_2","usage":{"input_tokens":1,"output_tokens":2}}`)),
+	}}
+	svc := &OpenAIGatewayService{
+		cfg:          &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
+		httpUpstream: upstream,
+	}
+	account := &Account{
+		ID:             123,
+		Name:           "acc",
+		Platform:       PlatformOpenAI,
+		Type:           AccountTypeOAuth,
+		Concurrency:    1,
+		Credentials:    map[string]any{"access_token": "oauth-token"},
+		Status:         StatusActive,
+		Schedulable:    true,
+		RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, originalBody)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, chatgptCodexURL, upstream.lastReq.URL.String())
+	require.Equal(t, originalBody, upstream.lastBody)
+	require.Equal(t, codexCLIUserAgent, upstream.lastReq.Header.Get("User-Agent"))
+	passthrough, ok := c.Get("openai_passthrough")
+	require.True(t, ok)
+	require.Equal(t, true, passthrough)
+}
+
+func TestOpenAIGatewayService_CodexOAuthPassthroughExplicitFalseKeepsLegacyPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(nil))
+	c.Request.Header.Set("User-Agent", "codex_cli_rs/0.135.0")
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	originalBody := []byte(`{"model":"gpt-5.5","stream":false,"input":[{"type":"text","text":"hi"}]}`)
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_passthrough_false"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"resp_3","usage":{"input_tokens":1,"output_tokens":2}}`)),
+	}}
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{Gateway: config.GatewayConfig{
+			ForceCodexCLI:                          false,
+			OpenAIResponsesPayloadTransformEnabled: true,
+		}},
+		httpUpstream: upstream,
+	}
+	account := &Account{
+		ID:             123,
+		Name:           "acc",
+		Platform:       PlatformOpenAI,
+		Type:           AccountTypeOAuth,
+		Concurrency:    1,
+		Credentials:    map[string]any{"access_token": "oauth-token"},
+		Extra:          map[string]any{"openai_passthrough": false},
+		Status:         StatusActive,
+		Schedulable:    true,
+		RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, originalBody)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotEqual(t, originalBody, upstream.lastBody)
+	require.True(t, gjson.GetBytes(upstream.lastBody, "instructions").Exists())
+	_, ok := c.Get("openai_passthrough")
+	require.False(t, ok)
+}
+
 func TestOpenAIGatewayService_NativeResponsesBodyModificationPreservesHTMLChars(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -168,7 +298,7 @@ func TestOpenAIGatewayService_OAuthMessagesBridgeDoesNotInjectDefaultInstruction
 		Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"invalid_request_error","message":"bridge stop"}}`)),
 	}}
 	svc := &OpenAIGatewayService{
-		cfg:          &config.Config{},
+		cfg:          &config.Config{Gateway: config.GatewayConfig{OpenAIResponsesPayloadTransformEnabled: true}},
 		httpUpstream: upstream,
 	}
 	account := &Account{
@@ -346,7 +476,10 @@ func TestOpenAIGatewayService_OAuthPassthrough_StreamKeepsToolNameAndBodyNormali
 	upstream := &httpUpstreamRecorder{resp: resp}
 
 	svc := &OpenAIGatewayService{
-		cfg:          &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
+		cfg: &config.Config{Gateway: config.GatewayConfig{
+			ForceCodexCLI:                          false,
+			OpenAIResponsesPayloadTransformEnabled: true,
+		}},
 		httpUpstream: upstream,
 		openAITokenProvider: &OpenAITokenProvider{ // minimal: will be bypassed by nil cache/service, but GetAccessToken uses provider only if non-nil
 			accountRepo: nil,
@@ -421,7 +554,10 @@ func TestOpenAIGatewayService_OAuthPassthrough_CompactUsesJSONAndKeepsNonStreami
 	upstream := &httpUpstreamRecorder{resp: resp}
 
 	svc := &OpenAIGatewayService{
-		cfg:          &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
+		cfg: &config.Config{Gateway: config.GatewayConfig{
+			ForceCodexCLI:                          false,
+			OpenAIResponsesPayloadTransformEnabled: true,
+		}},
 		httpUpstream: upstream,
 	}
 
@@ -574,7 +710,10 @@ func TestOpenAIGatewayService_OAuthPassthrough_DisabledUsesLegacyTransform(t *te
 	upstream := &httpUpstreamRecorder{resp: resp}
 
 	svc := &OpenAIGatewayService{
-		cfg:          &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
+		cfg: &config.Config{Gateway: config.GatewayConfig{
+			ForceCodexCLI:                          false,
+			OpenAIResponsesPayloadTransformEnabled: true,
+		}},
 		httpUpstream: upstream,
 	}
 
@@ -954,7 +1093,10 @@ func TestOpenAIGatewayService_OAuthPassthrough_NonCodexUAFallbackToCodexUA(t *te
 	upstream := &httpUpstreamRecorder{resp: resp}
 
 	svc := &OpenAIGatewayService{
-		cfg:          &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
+		cfg: &config.Config{Gateway: config.GatewayConfig{
+			ForceCodexCLI:                          false,
+			OpenAIResponsesPayloadTransformEnabled: true,
+		}},
 		httpUpstream: upstream,
 	}
 

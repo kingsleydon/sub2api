@@ -104,6 +104,7 @@ func TestOpenAIGatewayServiceForward_CodexImageInjectionRespectsGroupCapability(
 			}
 			svc := newOpenAIImageGenerationControlTestService(upstream)
 			svc.cfg.Gateway.CodexImageGenerationBridgeEnabled = tt.bridgeEnabled
+			svc.cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = tt.bridgeEnabled
 			c, _ := newOpenAIImageGenerationControlTestContext(tt.allowImages, "codex_cli_rs/0.98.0")
 			account := newOpenAIImageGenerationControlTestAccount()
 
@@ -131,6 +132,7 @@ func TestOpenAIGatewayServiceForward_ExplicitImageToolWorksWithBridgeDisabled(t 
 		},
 	}
 	svc := newOpenAIImageGenerationControlTestService(upstream)
+	svc.cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 	c, _ := newOpenAIImageGenerationControlTestContext(true, "codex_cli_rs/0.98.0")
 	account := newOpenAIImageGenerationControlTestAccount()
 	body := []byte(`{"model":"gpt-5.4","input":"draw","stream":false,"tools":[{"type":"image_generation","format":"jpeg"}]}`)
@@ -158,6 +160,7 @@ func TestOpenAIGatewayServiceForward_ChannelBridgeOverrideEnablesCodexInjection(
 		},
 	}
 	svc := newOpenAIImageGenerationControlTestService(upstream)
+	svc.cfg.Gateway.OpenAIResponsesPayloadTransformEnabled = true
 	groupID := int64(4242)
 	svc.channelService = newOpenAIImageGenerationControlChannelService(groupID, &Channel{
 		ID:     9001,

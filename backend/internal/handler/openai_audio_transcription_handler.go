@@ -22,13 +22,23 @@ import (
 	"go.uber.org/zap"
 )
 
-// effectiveTranscriptionModel is the model identifier used for billing when
-// the client does not specify (the upstream rejects unknown models).
+// effectiveTranscriptionModel is the model identifier used for billing and
+// account selection. The ChatGPT OAuth upstream receives only the file part, so
+// inbound model values are compatibility aliases for this shim.
 const effectiveTranscriptionModel = "gpt-4o-transcribe"
 
+var codexTranscriptionModelAliases = map[string]struct{}{
+	effectiveTranscriptionModel:         {},
+	"gpt-4o-mini-transcribe":            {},
+	"gpt-4o-mini-transcribe-2025-03-20": {},
+	"gpt-4o-mini-transcribe-2025-12-15": {},
+	"whisper-1":                         {},
+}
+
 // AudioTranscriptions handles POST /v1/audio/transcriptions.
-// Backed by ChatGPT/Codex's OAuth transcription endpoint; multipart body and
-// streaming SSE response are passed through.
+// Backed by ChatGPT/Codex's legacy OAuth transcription endpoint. The upstream
+// accepts only a file part, so OpenAI-compatible fields that do not change the
+// response shape are accepted at this boundary and dropped before forwarding.
 func (h *OpenAIGatewayHandler) AudioTranscriptions(c *gin.Context) {
 	streamStarted := false
 	defer h.recoverResponsesPanic(c, &streamStarted)
@@ -81,10 +91,18 @@ func (h *OpenAIGatewayHandler) AudioTranscriptions(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
 	}
+	if err := validateCodexTranscriptionMultipart(body, contentType); err != nil {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 
-	reqModel := extractMultipartTextField(body, contentType, "model")
-	if strings.TrimSpace(reqModel) == "" {
-		reqModel = effectiveTranscriptionModel
+	requestedModel := extractMultipartTextField(body, contentType, "model")
+	reqModel, ok := normalizeCodexTranscriptionModel(requestedModel)
+	if !ok {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", unsupportedTranscriptionModelMessage(strings.TrimSpace(requestedModel)))
+		return
+	}
+	if strings.TrimSpace(requestedModel) == "" {
 		body, contentType, err = ensureMultipartTextField(body, contentType, "model", reqModel)
 		if err != nil {
 			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse multipart form body")
@@ -124,6 +142,7 @@ func (h *OpenAIGatewayHandler) AudioTranscriptions(c *gin.Context) {
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 
 	for {
@@ -176,6 +195,26 @@ func (h *OpenAIGatewayHandler) AudioTranscriptions(c *gin.Context) {
 			reqLog.Warn("openai.audio_transcriptions.forward_failed", zap.Int64("account_id", account.ID), zap.Error(fwdErr))
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(fwdErr, &failoverErr) {
+				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
+				if failoverErr.RetryableOnSameAccount {
+					retryLimit := account.GetPoolModeRetryCount()
+					if sameAccountRetryCount[account.ID] < retryLimit {
+						sameAccountRetryCount[account.ID]++
+						reqLog.Warn("openai.audio_transcriptions.pool_mode_same_account_retry",
+							zap.Int64("account_id", account.ID),
+							zap.Int("upstream_status", failoverErr.StatusCode),
+							zap.Int("retry_limit", retryLimit),
+							zap.Int("retry_count", sameAccountRetryCount[account.ID]),
+						)
+						select {
+						case <-c.Request.Context().Done():
+							return
+						case <-time.After(sameAccountRetryDelay):
+						}
+						continue
+					}
+				}
+				h.gatewayService.RecordOpenAIAccountSwitch()
 				failedAccountIDs[account.ID] = struct{}{}
 				lastFailoverErr = failoverErr
 				if switchCount >= maxAccountSwitches {
@@ -183,10 +222,19 @@ func (h *OpenAIGatewayHandler) AudioTranscriptions(c *gin.Context) {
 					return
 				}
 				switchCount++
+				reqLog.Warn("openai.audio_transcriptions.upstream_failover_switching",
+					zap.Int64("account_id", account.ID),
+					zap.Int("upstream_status", failoverErr.StatusCode),
+					zap.Int("switch_count", switchCount),
+					zap.Int("max_switches", maxAccountSwitches),
+				)
 				continue
 			}
+			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
 			return
 		}
+
+		h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, nil)
 
 		userAgent := c.GetHeader("User-Agent")
 		clientIP := ip.GetClientIP(c)
@@ -224,6 +272,108 @@ func releaseIneligibleAccountSelection(selection *service.AccountSelectionResult
 	if selection != nil && selection.Acquired && selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}
+}
+
+func normalizeCodexTranscriptionModel(requested string) (string, bool) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return effectiveTranscriptionModel, true
+	}
+	_, ok := codexTranscriptionModelAliases[requested]
+	if !ok {
+		return "", false
+	}
+	return effectiveTranscriptionModel, true
+}
+
+func unsupportedTranscriptionModelMessage(model string) string {
+	return "model " + strconv.Quote(model) + " is not supported for Codex OAuth transcription; use " + strconv.Quote(effectiveTranscriptionModel)
+}
+
+func validateCodexTranscriptionMultipart(body []byte, contentType string) error {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return err
+	}
+	boundary, ok := params["boundary"]
+	if !ok || strings.TrimSpace(boundary) == "" {
+		return errors.New("missing multipart boundary")
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	hasFile := false
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return err
+		}
+
+		formName := part.FormName()
+		switch formName {
+		case "file":
+			hasFile = true
+		case "model":
+			value, err := readMultipartTextValue(part)
+			if err != nil {
+				_ = part.Close()
+				return err
+			}
+			if _, ok := normalizeCodexTranscriptionModel(value); !ok {
+				_ = part.Close()
+				return errors.New(unsupportedTranscriptionModelMessage(value))
+			}
+		case "language", "prompt", "temperature":
+			_, _ = io.Copy(io.Discard, part)
+		case "response_format":
+			value, err := readMultipartTextValue(part)
+			if err != nil {
+				_ = part.Close()
+				return err
+			}
+			if value != "" && value != "json" {
+				_ = part.Close()
+				return errors.New("response_format " + strconv.Quote(value) + " is not supported for Codex OAuth transcription; use \"json\"")
+			}
+		case "stream":
+			value, err := readMultipartTextValue(part)
+			if err != nil {
+				_ = part.Close()
+				return err
+			}
+			switch strings.ToLower(value) {
+			case "", "0", "false", "no", "off":
+			default:
+				_ = part.Close()
+				return errors.New("stream is not supported by Codex OAuth transcription")
+			}
+		default:
+			_, _ = io.Copy(io.Discard, part)
+			_ = part.Close()
+			if formName == "" {
+				return errors.New("multipart field name is required")
+			}
+			return errors.New("parameter " + strconv.Quote(formName) + " is not supported by Codex OAuth transcription")
+		}
+
+		if err := part.Close(); err != nil {
+			return err
+		}
+	}
+	if !hasFile {
+		return errors.New("multipart body missing file field")
+	}
+	return nil
+}
+
+func readMultipartTextValue(part *multipart.Part) (string, error) {
+	value, err := io.ReadAll(io.LimitReader(part, 64<<10))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(value)), nil
 }
 
 func ensureMultipartTextField(body []byte, contentType, fieldName, value string) ([]byte, string, error) {

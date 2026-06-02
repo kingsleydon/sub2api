@@ -90,6 +90,7 @@ func TestBuildTranscriptionUpstreamRequest_OAuthHeaders(t *testing.T) {
 				"token",
 			)
 			require.NoError(t, err)
+			require.Equal(t, "https://chatgpt.com/backend-api/transcribe", req.URL.String())
 			require.Equal(t, tt.expectedUA, req.Header.Get("User-Agent"))
 			require.Equal(t, "codex_cli_rs", req.Header.Get("originator"))
 			require.Equal(t, "responses=experimental", req.Header.Get("OpenAI-Beta"))
@@ -142,11 +143,107 @@ func TestForwardAudioTranscription_OAuthUsesChromeImpersonation(t *testing.T) {
 	require.Contains(t, rec.Body.String(), `"text":"hello"`)
 }
 
-func TestConvertTranscriptionMultipartForOAuth_PreservesFieldsAndNormalizesFile(t *testing.T) {
+func TestForwardAudioTranscription_Upstream403ReturnsFailoverWithoutWritingResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamBody := `<html><body>Forbidden</body></html>`
+	upstream := &recordingAudioHTTPUpstream{
+		doFunc: func(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header: http.Header{
+					"Content-Type": []string{"text/html"},
+					"Cf-Ray":       []string{"test-ray"},
+				},
+				Body: io.NopCloser(strings.NewReader(upstreamBody)),
+			}, nil
+		},
+	}
+
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	body, contentType := buildTranscriptionMultipart(t, "voice.ogg", map[string]string{
+		"model": "gpt-4o-transcribe",
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", contentType)
+
+	account := &Account{
+		ID:       4,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":       "token",
+			"chatgpt_account_id": "chatgpt-account",
+		},
+	}
+
+	_, err := svc.ForwardAudioTranscription(context.Background(), c, account, body, contentType)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusForbidden, failoverErr.StatusCode)
+	require.Equal(t, upstreamBody, string(failoverErr.ResponseBody))
+	require.Equal(t, "test-ray", failoverErr.ResponseHeaders.Get("Cf-Ray"))
+	require.Empty(t, rec.Body.String())
+	require.Empty(t, rec.Header().Get("Content-Type"))
+}
+
+func TestForwardAudioTranscription_Upstream400StillWritesResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamBody := `{"error":{"message":"invalid audio"}}`
+	upstream := &recordingAudioHTTPUpstream{
+		doFunc: func(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header: http.Header{
+					"Content-Type": []string{"application/json"},
+				},
+				Body: io.NopCloser(strings.NewReader(upstreamBody)),
+			}, nil
+		},
+	}
+
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	body, contentType := buildTranscriptionMultipart(t, "voice.ogg", map[string]string{
+		"model": "gpt-4o-transcribe",
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", contentType)
+
+	account := &Account{
+		ID:       4,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":       "token",
+			"chatgpt_account_id": "chatgpt-account",
+		},
+	}
+
+	_, err := svc.ForwardAudioTranscription(context.Background(), c, account, body, contentType)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.JSONEq(t, upstreamBody, rec.Body.String())
+	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+}
+
+func TestConvertTranscriptionMultipartForOAuth_FiltersOpenAIFieldsAndNormalizesFile(t *testing.T) {
 	body, contentType := buildTranscriptionMultipart(t, "", map[string]string{
+		"language":        "zh",
 		"model":           "gpt-4o-transcribe",
+		"prompt":          "previous context",
 		"response_format": "json",
 		"stream":          "true",
+		"temperature":     "0",
 		"include[]":       "logprobs",
 	})
 
@@ -182,10 +279,13 @@ func TestConvertTranscriptionMultipartForOAuth_PreservesFieldsAndNormalizesFile(
 	require.Equal(t, "abc123", string(gotFile))
 	require.Equal(t, "audio.wav", fileName)
 	require.Equal(t, "application/octet-stream", fileContentType)
-	require.Equal(t, []string{"gpt-4o-transcribe"}, gotFields["model"])
-	require.Equal(t, []string{"json"}, gotFields["response_format"])
-	require.Equal(t, []string{"true"}, gotFields["stream"])
-	require.Equal(t, []string{"logprobs"}, gotFields["include[]"])
+	require.NotContains(t, gotFields, "language")
+	require.NotContains(t, gotFields, "model")
+	require.NotContains(t, gotFields, "prompt")
+	require.NotContains(t, gotFields, "response_format")
+	require.NotContains(t, gotFields, "stream")
+	require.NotContains(t, gotFields, "temperature")
+	require.NotContains(t, gotFields, "include[]")
 }
 
 func TestConvertTranscriptionMultipartForOAuth_RejectsMissingFile(t *testing.T) {

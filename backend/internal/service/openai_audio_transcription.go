@@ -25,9 +25,10 @@ import (
 // growth bounded if the upstream emits an unusually long transcript line.
 const transcriptionSSELineBufferSize = 1 << 20 // 1 MiB
 
-// chatGPTTranscriptionPath is the upstream path the ChatGPT/Codex OAuth
-// backend serves /v1/audio/transcriptions from.
-const chatGPTTranscriptionPath = "/backend-api/codex/audio/transcriptions"
+// chatGPTTranscriptionPath is the ChatGPT/Codex OAuth transcription endpoint
+// used by Codex voice input. The public OpenAI-compatible inbound route remains
+// /v1/audio/transcriptions.
+const chatGPTTranscriptionPath = "/backend-api/transcribe"
 
 // OpenAIAudioTranscriptionForwardResult is the lightweight result returned by
 // ForwardAudioTranscription so the handler can record usage. The upstream
@@ -83,28 +84,21 @@ func (s *OpenAIGatewayService) ForwardAudioTranscription(ctx context.Context, c 
 	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
 	if err != nil {
 		safeErr := sanitizeUpstreamErrorMessage(err.Error())
-		setOpsUpstreamError(c, 0, safeErr, "")
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 			Platform:           account.Platform,
 			AccountID:          account.ID,
 			AccountName:        account.Name,
 			UpstreamStatusCode: 0,
-			Kind:               "request_error",
+			Kind:               "failover",
 			Message:            safeErr,
 		})
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error": gin.H{
-				"type":    "upstream_error",
-				"message": "Upstream request failed",
-			},
-		})
-		return nil, fmt.Errorf("upstream request failed: %s", safeErr)
+		return nil, &UpstreamFailoverError{StatusCode: http.StatusBadGateway}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		return s.handleAudioTranscriptionErrorResponse(c, account, resp, respBody)
+		return s.handleAudioTranscriptionErrorResponse(ctx, c, account, resp, respBody)
 	}
 
 	if isEventStreamResponse(resp.Header) {
@@ -239,6 +233,14 @@ func convertTranscriptionMultipartForOAuth(body []byte, contentType string) ([]b
 		}
 
 		formName := part.FormName()
+		// Codex's ChatGPT OAuth transcription endpoint only sends the file
+		// part. Keep public OpenAI-compatible fields at the gateway boundary
+		// and do not forward them upstream.
+		if formName != "file" {
+			_, _ = io.Copy(io.Discard, part)
+			_ = part.Close()
+			continue
+		}
 		header := mimeheader.Clone(part.Header)
 		if formName == "file" {
 			hasFile = true
@@ -330,19 +332,53 @@ func estimateTranscriptionOutputTokens(text string) int {
 	return (runes + 3) / 4
 }
 
-func (s *OpenAIGatewayService) handleAudioTranscriptionErrorResponse(c *gin.Context, account *Account, resp *http.Response, body []byte) (*OpenAIAudioTranscriptionForwardResult, error) {
+func (s *OpenAIGatewayService) handleAudioTranscriptionErrorResponse(ctx context.Context, c *gin.Context, account *Account, resp *http.Response, body []byte) (*OpenAIAudioTranscriptionForwardResult, error) {
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
-	setOpsUpstreamError(c, resp.StatusCode, upstreamMsg, "")
+	upstreamDetail := ""
+	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
+		maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
+		if maxBytes <= 0 {
+			maxBytes = 2048
+		}
+		upstreamDetail = truncateString(string(body), maxBytes)
+	}
+
+	if s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, body) {
+		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+			Platform:             account.Platform,
+			AccountID:            account.ID,
+			AccountName:          account.Name,
+			UpstreamStatusCode:   resp.StatusCode,
+			UpstreamRequestID:    extractOpenAIRequestIDHeader(resp.Header),
+			Kind:                 "failover",
+			Message:              upstreamMsg,
+			Detail:               upstreamDetail,
+			UpstreamResponseBody: upstreamDetail,
+		})
+		if s.rateLimitService != nil {
+			_ = s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, body)
+		}
+		return nil, &UpstreamFailoverError{
+			StatusCode:             resp.StatusCode,
+			ResponseBody:           body,
+			ResponseHeaders:        resp.Header.Clone(),
+			RetryableOnSameAccount: account.IsPoolMode() && (isPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, body)),
+		}
+	}
+
+	setOpsUpstreamError(c, resp.StatusCode, upstreamMsg, upstreamDetail)
 
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-		Platform:           account.Platform,
-		AccountID:          account.ID,
-		AccountName:        account.Name,
-		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  extractOpenAIRequestIDHeader(resp.Header),
-		Kind:               "http_error",
-		Message:            upstreamMsg,
+		Platform:             account.Platform,
+		AccountID:            account.ID,
+		AccountName:          account.Name,
+		UpstreamStatusCode:   resp.StatusCode,
+		UpstreamRequestID:    extractOpenAIRequestIDHeader(resp.Header),
+		Kind:                 "http_error",
+		Message:              upstreamMsg,
+		Detail:               upstreamDetail,
+		UpstreamResponseBody: upstreamDetail,
 	})
 
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)

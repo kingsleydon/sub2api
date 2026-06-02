@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"crypto/tls"
 	"fmt"
 	"strings"
 	"sync"
@@ -13,10 +14,12 @@ import (
 
 // reqClientOptions 定义 req 客户端的构建参数
 type reqClientOptions struct {
-	ProxyURL    string        // 代理 URL（支持 http/https/socks5）
-	Timeout     time.Duration // 请求超时时间
-	Impersonate bool          // 是否模拟 Chrome 浏览器指纹
-	ForceHTTP2  bool          // 是否强制使用 HTTP/2
+	ProxyURL              string        // 代理 URL（支持 http/https/socks5）
+	Timeout               time.Duration // 请求超时时间
+	ResponseHeaderTimeout time.Duration // 等待响应头超时
+	MinTLSVersion         uint16        // 最低 TLS 版本（0 表示默认）
+	Impersonate           bool          // 是否模拟 Chrome 浏览器指纹
+	ForceHTTP2            bool          // 是否强制使用 HTTP/2
 }
 
 // sharedReqClients 存储按配置参数缓存的 req 客户端实例
@@ -43,7 +46,16 @@ func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 		}
 	}
 
-	client := req.C().SetTimeout(opts.Timeout)
+	client := req.C()
+	if opts.Timeout > 0 {
+		client.SetTimeout(opts.Timeout)
+	}
+	if opts.ResponseHeaderTimeout > 0 {
+		client.SetResponseHeaderTimeout(opts.ResponseHeaderTimeout)
+	}
+	if opts.MinTLSVersion >= tls.VersionTLS13 {
+		client.SetTLSClientConfig(&tls.Config{MinVersion: tls.VersionTLS13})
+	}
 	if opts.ForceHTTP2 {
 		client = client.EnableForceHTTP2()
 	}
@@ -66,9 +78,11 @@ func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 }
 
 func buildReqClientKey(opts reqClientOptions) string {
-	return fmt.Sprintf("%s|%s|%t|%t",
+	return fmt.Sprintf("%s|%s|%s|%d|%t|%t",
 		strings.TrimSpace(opts.ProxyURL),
 		opts.Timeout.String(),
+		opts.ResponseHeaderTimeout.String(),
+		opts.MinTLSVersion,
 		opts.Impersonate,
 		opts.ForceHTTP2,
 	)

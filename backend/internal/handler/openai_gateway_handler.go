@@ -34,6 +34,7 @@ type OpenAIGatewayHandler struct {
 	usageRecordWorkerPool    *service.UsageRecordWorkerPool
 	errorPassthroughService  *service.ErrorPassthroughService
 	contentModerationService *service.ContentModerationService
+	externalBillingService   *service.ExternalBillingService
 	concurrencyHelper        *ConcurrencyHelper
 	imageLimiter             *imageConcurrencyLimiter
 	maxAccountSwitches       int
@@ -81,6 +82,7 @@ func NewOpenAIGatewayHandler(
 	usageRecordWorkerPool *service.UsageRecordWorkerPool,
 	errorPassthroughService *service.ErrorPassthroughService,
 	contentModerationService *service.ContentModerationService,
+	externalBillingService *service.ExternalBillingService,
 	cfg *config.Config,
 ) *OpenAIGatewayHandler {
 	pingInterval := time.Duration(0)
@@ -98,6 +100,7 @@ func NewOpenAIGatewayHandler(
 		usageRecordWorkerPool:    usageRecordWorkerPool,
 		errorPassthroughService:  errorPassthroughService,
 		contentModerationService: contentModerationService,
+		externalBillingService:   externalBillingService,
 		concurrencyHelper:        NewConcurrencyHelper(concurrencyService, SSEPingFormatComment, pingInterval),
 		imageLimiter:             &imageConcurrencyLimiter{},
 		maxAccountSwitches:       maxAccountSwitches,
@@ -268,14 +271,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		defer userReleaseFunc()
 	}
 
-	// 2. Re-check billing eligibility after wait
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("openai.billing_eligibility_check_failed", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
+	// 2. Re-check billing eligibility after wait (Clawdi external billing when enabled)
+	if br := checkBillingEligibility(c, h.externalBillingService, h.billingCacheService, apiKey.User, apiKey, apiKey.Group, subscription, reqModel, reqStream); br != nil {
+		reqLog.Info("openai.billing_eligibility_check_failed", zap.Error(br.Err))
+		if br.RetryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(br.RetryAfter))
 		}
-		h.handleStreamingAwareError(c, status, code, message, streamStarted)
+		h.handleStreamingAwareError(c, br.Status, br.Code, br.Message, streamStarted)
 		return
 	}
 
@@ -675,13 +677,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		defer userReleaseFunc()
 	}
 
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("openai_messages.billing_eligibility_check_failed", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
+	if br := checkBillingEligibility(c, h.externalBillingService, h.billingCacheService, apiKey.User, apiKey, apiKey.Group, subscription, reqModel, reqStream); br != nil {
+		reqLog.Info("openai_messages.billing_eligibility_check_failed", zap.Error(br.Err))
+		if br.RetryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(br.RetryAfter))
 		}
-		h.anthropicStreamingAwareError(c, status, code, message, streamStarted)
+		h.anthropicStreamingAwareError(c, br.Status, br.Code, br.Message, streamStarted)
 		return
 	}
 
@@ -1276,8 +1277,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
-	if err := h.billingCacheService.CheckBillingEligibility(ctx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("openai.websocket_billing_eligibility_check_failed", zap.Error(err))
+	if br := checkBillingEligibility(c, h.externalBillingService, h.billingCacheService, apiKey.User, apiKey, apiKey.Group, subscription, reqModel, true); br != nil {
+		reqLog.Info("openai.websocket_billing_eligibility_check_failed", zap.Error(br.Err))
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
 		return
 	}

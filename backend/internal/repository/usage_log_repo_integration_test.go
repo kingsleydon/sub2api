@@ -133,6 +133,14 @@ func TestUsageLogRepositoryCreate_BatchPathConcurrent(t *testing.T) {
 	var count int
 	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_logs WHERE api_key_id = $1", apiKey.ID).Scan(&count))
 	require.Equal(t, total, count)
+
+	var outboxCount int
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM billing_usage_outbox
+		WHERE usage_log_id IN (SELECT id FROM usage_logs WHERE api_key_id = $1)
+	`, apiKey.ID).Scan(&outboxCount))
+	require.Equal(t, total, outboxCount)
 }
 
 func TestUsageLogRepositoryCreate_BatchPathDuplicateRequestID(t *testing.T) {
@@ -181,6 +189,16 @@ func TestUsageLogRepositoryCreate_BatchPathDuplicateRequestID(t *testing.T) {
 	var count int
 	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_logs WHERE request_id = $1 AND api_key_id = $2", requestID, apiKey.ID).Scan(&count))
 	require.Equal(t, 1, count)
+
+	var outboxCount int
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM billing_usage_outbox
+		WHERE usage_log_id IN (
+			SELECT id FROM usage_logs WHERE request_id = $1 AND api_key_id = $2
+		)
+	`, requestID, apiKey.ID).Scan(&outboxCount))
+	require.Equal(t, 1, outboxCount)
 }
 
 func TestUsageLogRepositoryFlushCreateBatch_DeduplicatesSameKeyInMemory(t *testing.T) {
@@ -284,6 +302,18 @@ func TestUsageLogRepositoryCreateBestEffort_BatchPathDuplicateRequestID(t *testi
 	require.Eventually(t, func() bool {
 		var count int
 		err := integrationDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_logs WHERE request_id = $1 AND api_key_id = $2", requestID, apiKey.ID).Scan(&count)
+		return err == nil && count == 1
+	}, 3*time.Second, 20*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		var count int
+		err := integrationDB.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM billing_usage_outbox
+			WHERE usage_log_id IN (
+				SELECT id FROM usage_logs WHERE request_id = $1 AND api_key_id = $2
+			)
+		`, requestID, apiKey.ID).Scan(&count)
 		return err == nil && count == 1
 	}, 3*time.Second, 20*time.Millisecond)
 }

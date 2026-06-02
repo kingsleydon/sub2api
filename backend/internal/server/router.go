@@ -111,6 +111,11 @@ func registerRoutes(
 	routes.RegisterUserRoutes(v1, h, jwtAuth, settingService)
 	routes.RegisterAdminRoutes(v1, h, adminAuth)
 	routes.RegisterGatewayRoutes(r, h, apiKeyAuth, apiKeyService, subscriptionService, opsService, settingService, cfg)
+	// Internal routes (shared-secret auth, used by Clawdi backend) — only gate
+	// when external billing is enabled to avoid exposing the sync surface.
+	if cfg != nil && cfg.Billing.IsExternalBillingEnabled() {
+		routes.RegisterInternalRoutes(v1, h)
+	}
 	routes.RegisterPaymentRoutes(v1, h.Payment, h.PaymentWebhook, h.Admin.Payment, jwtAuth, adminAuth, settingService)
 
 	handler.RegisterPageRoutes(v1, cfg.Pricing.DataDir, gin.HandlerFunc(jwtAuth), gin.HandlerFunc(adminAuth), settingService)

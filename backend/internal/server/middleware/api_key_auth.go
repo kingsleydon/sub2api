@@ -67,6 +67,20 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		// ── 2. 验证 Key 存在 ─────────────────────────────────────────
 
 		apiKey, err := apiKeyService.GetByKey(c.Request.Context(), apiKeyString)
+		if err != nil && errors.Is(err, service.ErrAPIKeyNotFound) {
+			// Bearer token not found — fall back to x-api-key / x-goog-api-key
+			// before returning an error. This supports clients (e.g. Pi) that
+			// send an OAuth JWT in Authorization while providing the sub2api
+			// API key in x-api-key.
+			fallbackKey := c.GetHeader("x-api-key")
+			if fallbackKey == "" {
+				fallbackKey = c.GetHeader("x-goog-api-key")
+			}
+			if fallbackKey != "" && fallbackKey != apiKeyString {
+				apiKeyString = fallbackKey
+				apiKey, err = apiKeyService.GetByKey(c.Request.Context(), apiKeyString)
+			}
+		}
 		if err != nil {
 			if errors.Is(err, service.ErrAPIKeyNotFound) {
 				AbortWithError(c, 401, "INVALID_API_KEY", "Invalid API key")
@@ -202,7 +216,8 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 				}
 			} else {
 				// 非订阅模式 或 订阅模式但 subscriptionService 未注入：回退到余额检查
-				if apiKey.User.Balance <= 0 {
+				// When Clawdi external billing is enabled, skip local balance check.
+				if (cfg == nil || !cfg.Billing.IsExternalBillingEnabled()) && apiKey.User.Balance <= 0 {
 					AbortWithError(c, 403, "INSUFFICIENT_BALANCE", "Insufficient account balance")
 					return
 				}

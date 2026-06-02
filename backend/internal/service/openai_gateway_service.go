@@ -3994,8 +3994,14 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 		if originalModel != "" && mappedModel != "" && originalModel != mappedModel {
 			body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
 		}
-		// Correct tool calls in final response
-		body = s.correctToolCallsInResponseBody(body)
+		// Tool-name rewrites are off in passthrough mode by default. The
+		// passthrough contract is "forward as-is + only swap auth", so
+		// rewriting tool call names in the compact-to-JSON conversion would
+		// silently change client-visible payloads. Opt in via
+		// gateway.openai_passthrough_rewrite_tool_names=true to restore.
+		if s.cfg != nil && s.cfg.Gateway.OpenAIPassthroughRewriteToolNames {
+			body = s.correctToolCallsInResponseBody(body)
+		}
 	} else {
 		terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)
 		if terminalOK && terminalType == "response.failed" {

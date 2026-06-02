@@ -48,6 +48,7 @@ type GatewayHandler struct {
 	usageRecordWorkerPool     *service.UsageRecordWorkerPool
 	errorPassthroughService   *service.ErrorPassthroughService
 	contentModerationService  *service.ContentModerationService
+	externalBillingService    *service.ExternalBillingService
 	concurrencyHelper         *ConcurrencyHelper
 	userMsgQueueHelper        *UserMsgQueueHelper
 	maxAccountSwitches        int
@@ -69,6 +70,7 @@ func NewGatewayHandler(
 	usageRecordWorkerPool *service.UsageRecordWorkerPool,
 	errorPassthroughService *service.ErrorPassthroughService,
 	contentModerationService *service.ContentModerationService,
+	externalBillingService *service.ExternalBillingService,
 	userMsgQueueService *service.UserMessageQueueService,
 	cfg *config.Config,
 	settingService *service.SettingService,
@@ -103,6 +105,7 @@ func NewGatewayHandler(
 		usageRecordWorkerPool:     usageRecordWorkerPool,
 		errorPassthroughService:   errorPassthroughService,
 		contentModerationService:  contentModerationService,
+		externalBillingService:    externalBillingService,
 		concurrencyHelper:         NewConcurrencyHelper(concurrencyService, SSEPingFormatClaude, pingInterval),
 		userMsgQueueHelper:        umqHelper,
 		maxAccountSwitches:        maxAccountSwitches,
@@ -251,14 +254,13 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		defer userReleaseFunc()
 	}
 
-	// 2. 【新增】Wait后二次检查余额/订阅
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("gateway.billing_eligibility_check_failed", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
+	// 2. 【新增】Wait后二次检查余额/订阅（Clawdi external billing 启用时改走 Authorize）
+	if br := checkBillingEligibility(c, h.externalBillingService, h.billingCacheService, apiKey.User, apiKey, apiKey.Group, subscription, parsedReq.Model, parsedReq.Stream); br != nil {
+		reqLog.Info("gateway.billing_eligibility_check_failed", zap.Error(br.Err))
+		if br.RetryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(br.RetryAfter))
 		}
-		h.handleStreamingAwareError(c, status, code, message, streamStarted)
+		h.handleStreamingAwareError(c, br.Status, br.Code, br.Message, streamStarted)
 		return
 	}
 
@@ -836,12 +838,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 							return
 						}
 						fallbackAPIKey := cloneAPIKeyWithGroup(apiKey, fallbackGroup)
-						if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), fallbackAPIKey.User, fallbackAPIKey, fallbackGroup, nil, service.PlatformFromAPIKey(fallbackAPIKey)); err != nil {
-							status, code, message, retryAfter := billingErrorDetails(err)
-							if retryAfter > 0 {
-								c.Header("Retry-After", strconv.Itoa(retryAfter))
+						if br := checkBillingEligibility(c, h.externalBillingService, h.billingCacheService, fallbackAPIKey.User, fallbackAPIKey, fallbackGroup, nil, parsedReq.Model, parsedReq.Stream); br != nil {
+							if br.RetryAfter > 0 {
+								c.Header("Retry-After", strconv.Itoa(br.RetryAfter))
 							}
-							h.handleStreamingAwareError(c, status, code, message, streamStarted)
+							h.handleStreamingAwareError(c, br.Status, br.Code, br.Message, streamStarted)
 							return
 						}
 						// 兜底重试按"直接请求兜底分组"处理：清除强制平台，允许按分组平台调度
@@ -1733,14 +1734,13 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	// 获取订阅信息（可能为nil）
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 
-	// 校验 billing eligibility（订阅/余额）
+	// 校验 billing eligibility（订阅/余额；Clawdi 启用时改走 Authorize）
 	// 【注意】不计算并发，但需要校验订阅/余额
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
+	if br := checkBillingEligibility(c, h.externalBillingService, h.billingCacheService, apiKey.User, apiKey, apiKey.Group, subscription, parsedReq.Model, parsedReq.Stream); br != nil {
+		if br.RetryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(br.RetryAfter))
 		}
-		h.errorResponse(c, status, code, message)
+		h.errorResponse(c, br.Status, br.Code, br.Message)
 		return
 	}
 

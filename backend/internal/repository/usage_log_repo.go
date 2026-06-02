@@ -355,8 +355,14 @@ func (r *usageLogRepository) createSingle(ctx context.Context, sqlq sqlExecutor,
 		return false, service.MarkUsageLogCreateNotPersisted(ctx.Err())
 	}
 
+	// Wrap the usage_logs INSERT in a CTE that also writes a row into
+	// billing_usage_outbox for Clawdi credits sync. The outbox row is only
+	// produced when the usage_logs INSERT actually happened (i.e. it was not
+	// dropped by ON CONFLICT) thanks to EXISTS (SELECT 1 FROM inserted),
+	// so duplicate insert attempts do not consume outbox sequence numbers.
 	query := `
-		INSERT INTO usage_logs (
+			WITH inserted AS (
+			INSERT INTO usage_logs (
 			user_id,
 			api_key_id,
 			account_id,
@@ -414,10 +420,12 @@ func (r *usageLogRepository) createSingle(ctx context.Context, sqlq sqlExecutor,
 			$14, $15, $16, $17,
 			$18, $19, $20, $21, $22, $23,
 			$24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50
-		)
-		ON CONFLICT (request_id, api_key_id) DO NOTHING
-		RETURNING id, created_at
-	`
+			)
+			ON CONFLICT (request_id, api_key_id) DO NOTHING
+			RETURNING id, user_id, model, actual_cost, created_at
+			)` + usageLogOutboxCTEs() + `
+			SELECT id, created_at FROM inserted
+		`
 
 	if err := scanSingleRow(ctx, sqlq, query, prepared.args, &log.ID, &log.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) && prepared.requestID != "" {
@@ -982,14 +990,16 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 				billing_mode,
 				account_stats_cost,
 				created_at
-			FROM input
-			ON CONFLICT (request_id, api_key_id) DO NOTHING
-			RETURNING request_id, api_key_id, id, created_at
-		),
-		resolved AS (
-			SELECT
-				input.input_idx,
-				input.request_id,
+				FROM input
+				ON CONFLICT (request_id, api_key_id) DO NOTHING
+				RETURNING request_id, api_key_id, id, user_id, model, actual_cost, created_at
+			)`)
+	_, _ = query.WriteString(usageLogOutboxCTEs())
+	_, _ = query.WriteString(`,
+			resolved AS (
+				SELECT
+					input.input_idx,
+					input.request_id,
 				input.api_key_id,
 				COALESCE(inserted.id, existing.id) AS id,
 				COALESCE(inserted.created_at, existing.created_at) AS created_at,
@@ -1100,8 +1110,9 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 	}
 
 	_, _ = query.WriteString(`
-		)
-		INSERT INTO usage_logs (
+			),
+			inserted AS (
+				INSERT INTO usage_logs (
 			user_id,
 			api_key_id,
 			account_id,
@@ -1204,76 +1215,59 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			billing_mode,
 			account_stats_cost,
 			created_at
-		FROM input
-		ON CONFLICT (request_id, api_key_id) DO NOTHING
-	`)
+			FROM input
+			ON CONFLICT (request_id, api_key_id) DO NOTHING
+			RETURNING id, user_id, model, actual_cost, created_at
+			)`)
+	_, _ = query.WriteString(usageLogOutboxCTEs())
+	_, _ = query.WriteString(`
+			SELECT 1 FROM outbox
+		`)
 
 	return query.String(), args
 }
 
+func usageLogOutboxCTEs() string {
+	return `
+		, inserted_ordered AS (
+			SELECT
+				inserted.*,
+				row_number() OVER (ORDER BY inserted.id) - 1 AS outbox_offset
+			FROM inserted
+		),
+		assigned AS (
+			UPDATE billing_usage_outbox_seq
+			SET next_seq = next_seq + (SELECT count(*) FROM inserted_ordered)
+			WHERE id = 1
+			  AND EXISTS (SELECT 1 FROM inserted_ordered)
+			RETURNING next_seq - (SELECT count(*) FROM inserted_ordered) AS first_outbox_id
+		),
+		outbox AS (
+			INSERT INTO billing_usage_outbox (
+				id,
+				usage_log_id,
+				user_id,
+				model,
+				actual_cost,
+				usage_created_at
+			)
+			SELECT
+				assigned.first_outbox_id + inserted_ordered.outbox_offset,
+				inserted_ordered.id,
+				inserted_ordered.user_id,
+				inserted_ordered.model,
+				inserted_ordered.actual_cost,
+				inserted_ordered.created_at
+			FROM inserted_ordered
+			JOIN assigned ON TRUE
+			ON CONFLICT (usage_log_id) DO NOTHING
+			RETURNING 1
+		)`
+}
+
 func execUsageLogInsertNoResult(ctx context.Context, sqlq sqlExecutor, prepared usageLogInsertPrepared) error {
-	_, err := sqlq.ExecContext(ctx, `
-		INSERT INTO usage_logs (
-			user_id,
-			api_key_id,
-			account_id,
-			request_id,
-			model,
-			requested_model,
-			upstream_model,
-			group_id,
-			subscription_id,
-			input_tokens,
-			output_tokens,
-			cache_creation_tokens,
-			cache_read_tokens,
-			cache_creation_5m_tokens,
-			cache_creation_1h_tokens,
-			image_output_tokens,
-			image_output_cost,
-			input_cost,
-			output_cost,
-			cache_creation_cost,
-			cache_read_cost,
-			total_cost,
-			actual_cost,
-			rate_multiplier,
-			account_rate_multiplier,
-			billing_type,
-			request_type,
-			stream,
-			openai_ws_mode,
-			duration_ms,
-			first_token_ms,
-			user_agent,
-			ip_address,
-			image_count,
-			image_size,
-			image_input_size,
-			image_output_size,
-			image_size_source,
-			image_size_breakdown,
-			service_tier,
-			reasoning_effort,
-			inbound_endpoint,
-			upstream_endpoint,
-			cache_ttl_overridden,
-			channel_id,
-			model_mapping_chain,
-			billing_tier,
-			billing_mode,
-			account_stats_cost,
-			created_at
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7,
-			$8, $9,
-			$10, $11, $12, $13,
-			$14, $15, $16, $17,
-			$18, $19, $20, $21, $22, $23,
-			$24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50
-		)
-		ON CONFLICT (request_id, api_key_id) DO NOTHING
-	`, prepared.args...)
+	query, args := buildUsageLogBestEffortInsertQuery([]usageLogInsertPrepared{prepared})
+	_, err := sqlq.ExecContext(ctx, query, args...)
 	return err
 }
 

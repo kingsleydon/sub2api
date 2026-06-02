@@ -36,6 +36,7 @@ type AdminHandlers struct {
 	ContentModeration      *admin.ContentModerationHandler
 	Payment                *admin.PaymentHandler
 	Affiliate              *admin.AffiliateHandler
+	BillingSync            *admin.BillingSyncHandler
 }
 
 // Handlers contains all HTTP handlers

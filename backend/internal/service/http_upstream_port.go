@@ -1,10 +1,47 @@
 package service
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 )
+
+type upstreamRequestOptionsKey struct{}
+
+// UpstreamBrowserImpersonation selects a browser-like client profile for
+// upstream paths that are sensitive to non-browser fingerprints (notably
+// ChatGPT/Codex OAuth audio transcription).
+type UpstreamBrowserImpersonation string
+
+const (
+	UpstreamBrowserImpersonationNone   UpstreamBrowserImpersonation = ""
+	UpstreamBrowserImpersonationChrome UpstreamBrowserImpersonation = "chrome"
+)
+
+// UpstreamRequestOptions are per-request transport hints attached via context
+// so the transport layer can pick up the request-scoped overrides without
+// changing the HTTPUpstream interface signature.
+type UpstreamRequestOptions struct {
+	// MinTLSVersion is request-scoped transport minimum TLS version (0 = default).
+	MinTLSVersion uint16
+	// BrowserImpersonation enables a browser-like upstream client.
+	BrowserImpersonation UpstreamBrowserImpersonation
+}
+
+// WithUpstreamRequestOptions attaches options to the request context.
+func WithUpstreamRequestOptions(ctx context.Context, opts UpstreamRequestOptions) context.Context {
+	return context.WithValue(ctx, upstreamRequestOptionsKey{}, opts)
+}
+
+// GetUpstreamRequestOptions retrieves request-scoped upstream options.
+func GetUpstreamRequestOptions(ctx context.Context) (UpstreamRequestOptions, bool) {
+	if ctx == nil {
+		return UpstreamRequestOptions{}, false
+	}
+	opts, ok := ctx.Value(upstreamRequestOptionsKey{}).(UpstreamRequestOptions)
+	return opts, ok
+}
 
 // HTTPUpstream 上游 HTTP 请求接口
 // 用于向上游 API（Claude、OpenAI、Gemini 等）发送请求

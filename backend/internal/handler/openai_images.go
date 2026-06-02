@@ -124,13 +124,12 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		defer userReleaseFunc()
 	}
 
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("openai.images.billing_eligibility_check_failed", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
+	if br := checkBillingEligibility(c, h.externalBillingService, h.billingCacheService, apiKey.User, apiKey, apiKey.Group, subscription, parsed.Model, parsed.Stream); br != nil {
+		reqLog.Info("openai.images.billing_eligibility_check_failed", zap.Error(br.Err))
+		if br.RetryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(br.RetryAfter))
 		}
-		h.handleStreamingAwareError(c, status, code, message, streamStarted)
+		h.handleStreamingAwareError(c, br.Status, br.Code, br.Message, streamStarted)
 		return
 	}
 

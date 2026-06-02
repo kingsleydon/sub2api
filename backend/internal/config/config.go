@@ -652,6 +652,30 @@ type BillingConfig struct {
 	// UserPlatformQuotaSentinelTTLSeconds sentinel(无 limit 占位)entry 的 TTL,
 	// 显著短于 quota cache 默认 86400s 以控 Redis 内存;默认 3600=1h。
 	UserPlatformQuotaSentinelTTLSeconds int `mapstructure:"user_platform_quota_sentinel_ttl_seconds"`
+	// Clawdi external billing fields (appended, do not re-align upstream fields)
+	ClawdiBillingURL    string `mapstructure:"clawdi_billing_url"`    // Base URL, e.g. "https://api.clawdi.com/internal/llm". "/authorize" is appended.
+	ClawdiBillingSecret string `mapstructure:"clawdi_billing_secret"` // Shared secret for sync endpoint auth (env: SUB2API_BILLING_SECRET)
+	ClawdiBillingMode   string `mapstructure:"clawdi_billing_mode"`   // "production" | "dry_run", default empty = disabled
+}
+
+func (c BillingConfig) normalizedMode() string {
+	return strings.ToLower(strings.TrimSpace(c.ClawdiBillingMode))
+}
+
+// IsExternalBillingEnabled returns true when external billing is enabled by mode.
+func (c BillingConfig) IsExternalBillingEnabled() bool {
+	mode := c.normalizedMode()
+	return mode == "production" || mode == "dry_run"
+}
+
+// IsExternalBillingProduction returns true when external billing is in production mode.
+func (c BillingConfig) IsExternalBillingProduction() bool {
+	return c.normalizedMode() == "production"
+}
+
+// IsExternalBillingDryRun returns true when external billing is in dry-run mode.
+func (c BillingConfig) IsExternalBillingDryRun() bool {
+	return c.normalizedMode() == "dry_run"
 }
 
 type CircuitBreakerConfig struct {
@@ -768,6 +792,15 @@ type GatewayConfig struct {
 
 	// API-key 账号在客户端未提供 anthropic-beta 时，是否按需自动补齐（默认关闭以保持兼容）
 	InjectBetaForAPIKey bool `mapstructure:"inject_beta_for_apikey"`
+
+	// OpenAIPassthroughRewriteToolNames controls whether sub2api rewrites tool
+	// call names (e.g. apply_patch -> edit) when an OpenAI passthrough request
+	// is converted from upstream SSE back to JSON in handlePassthroughSSEToJSON.
+	// Default false: tool names are preserved verbatim, matching the
+	// passthrough contract ("forward as-is + only swap auth"). Set to true to
+	// restore the legacy rewrite behaviour.
+	// Env: GATEWAY_OPENAI_PASSTHROUGH_REWRITE_TOOL_NAMES
+	OpenAIPassthroughRewriteToolNames bool `mapstructure:"openai_passthrough_rewrite_tool_names"`
 
 	// 是否允许对部分 400 错误触发 failover（默认关闭以避免改变语义）
 	FailoverOn400 bool `mapstructure:"failover_on_400"`
@@ -1581,7 +1614,13 @@ func setDefaults() {
 	// Security - disable direct fallback on proxy error
 	viper.SetDefault("security.proxy_fallback.allow_direct_on_error", false)
 
-	// Billing
+	// Billing – external Clawdi integration
+	viper.SetDefault("billing.clawdi_billing_url", "")
+	viper.SetDefault("billing.clawdi_billing_secret", "")
+	viper.SetDefault("billing.clawdi_billing_mode", "")
+	_ = viper.BindEnv("billing.clawdi_billing_url", "CLAWDI_BILLING_URL")
+	_ = viper.BindEnv("billing.clawdi_billing_secret", "SUB2API_BILLING_SECRET")
+	_ = viper.BindEnv("billing.clawdi_billing_mode", "CLAWDI_BILLING_MODE")
 	viper.SetDefault("billing.circuit_breaker.enabled", true)
 	viper.SetDefault("billing.circuit_breaker.failure_threshold", 5)
 	viper.SetDefault("billing.circuit_breaker.reset_timeout_seconds", 30)
@@ -1794,6 +1833,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.log_upstream_error_body", true)
 	viper.SetDefault("gateway.log_upstream_error_body_max_bytes", 2048)
 	viper.SetDefault("gateway.inject_beta_for_apikey", false)
+	viper.SetDefault("gateway.openai_passthrough_rewrite_tool_names", false)
 	viper.SetDefault("gateway.failover_on_400", false)
 	viper.SetDefault("gateway.max_account_switches", 10)
 	viper.SetDefault("gateway.max_account_switches_gemini", 3)
@@ -2245,6 +2285,20 @@ func (c *Config) Validate() error {
 		if c.Billing.CircuitBreaker.HalfOpenRequests <= 0 {
 			return fmt.Errorf("billing.circuit_breaker.half_open_requests must be positive")
 		}
+	}
+	// Clawdi external billing validation
+	rawMode := strings.TrimSpace(c.Billing.ClawdiBillingMode)
+	mode := strings.ToLower(rawMode)
+	if rawMode != "" && mode != "production" && mode != "dry_run" {
+		return fmt.Errorf("CLAWDI_BILLING_MODE must be 'production', 'dry_run', or empty; got %q", rawMode)
+	}
+	if c.Billing.IsExternalBillingProduction() {
+		if strings.TrimSpace(c.Billing.ClawdiBillingURL) == "" || strings.TrimSpace(c.Billing.ClawdiBillingSecret) == "" {
+			return fmt.Errorf("CLAWDI_BILLING_URL and SUB2API_BILLING_SECRET are required in production mode")
+		}
+	}
+	if c.Billing.IsExternalBillingDryRun() && strings.TrimSpace(c.Billing.ClawdiBillingSecret) == "" {
+		return fmt.Errorf("SUB2API_BILLING_SECRET is required in dry_run mode")
 	}
 	if c.Database.MaxOpenConns <= 0 {
 		return fmt.Errorf("database.max_open_conns must be positive")

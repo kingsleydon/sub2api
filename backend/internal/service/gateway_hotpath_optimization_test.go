@@ -580,6 +580,52 @@ func TestGetAvailableModels_ErrorAndGlobalListBranches(t *testing.T) {
 	require.Equal(t, int64(1), okRepo.listAllCalls.Load())
 }
 
+func TestGetAvailableModels_MergesMappedAndUnmappedPlatformDefaults(t *testing.T) {
+	resetGatewayHotpathStatsForTest()
+
+	repo := &modelsListAccountRepoStub{
+		all: []Account{
+			{
+				ID:       1,
+				Platform: PlatformOpenAI,
+			},
+			{
+				ID:       2,
+				Platform: PlatformOpenAI,
+				Credentials: map[string]any{
+					"model_mapping": map[string]any{
+						"text-embedding-3-large": "text-embedding-3-large",
+						"text-embedding-3-small": "text-embedding-3-small",
+					},
+				},
+			},
+			{
+				ID:       3,
+				Platform: PlatformAnthropic,
+				Credentials: map[string]any{
+					"model_mapping": map[string]any{
+						"kimi-for-coding":          "kimi-for-coding",
+						"kimi-for-coding-thinking": "kimi-for-coding-thinking",
+					},
+				},
+			},
+		},
+	}
+	svc := &GatewayService{
+		accountRepo:        repo,
+		modelsListCache:    gocache.New(time.Minute, time.Minute),
+		modelsListCacheTTL: time.Minute,
+	}
+
+	models := svc.GetAvailableModels(context.Background(), nil, "")
+	require.Contains(t, models, "gpt-5.5")
+	require.Contains(t, models, "gpt-5.4")
+	require.Contains(t, models, "text-embedding-3-large")
+	require.Contains(t, models, "text-embedding-3-small")
+	require.Contains(t, models, "kimi-for-coding")
+	require.Equal(t, int64(1), repo.listAllCalls.Load())
+}
+
 func TestGatewayHotpathHelpers_CacheTTLAndStickyContext(t *testing.T) {
 	t.Run("resolve_user_group_rate_cache_ttl", func(t *testing.T) {
 		require.Equal(t, defaultUserGroupRateCacheTTL, resolveUserGroupRateCacheTTL(nil))

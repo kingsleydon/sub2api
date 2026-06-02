@@ -94,7 +94,14 @@ func FilterHeaders(src http.Header, filter *CompiledHeaderFilter) http.Header {
 			continue
 		}
 		if _, ok := filter.allowed[lower]; !ok {
-			continue
+			// Keep provider-specific metadata headers (request IDs, model
+			// identifiers) for better API fidelity — particularly the
+			// x-openai-* / x-oai-* family used by the Codex/ChatGPT upstream.
+			if !strings.HasPrefix(lower, "x-openai-") &&
+				!strings.HasPrefix(lower, "openai-") &&
+				!strings.HasPrefix(lower, "x-oai-") {
+				continue
+			}
 		}
 		// 跳过 hop-by-hop 头部，这些由 HTTP 库自动处理
 		if _, isHopByHop := hopByHopHeaders[lower]; isHopByHop {

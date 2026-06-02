@@ -167,8 +167,22 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 		profile = service.HTTPUpstreamProfileFromContext(req.Context())
 	}
 
+	// Pick up request-scoped transport hints (TLS min version, Chrome
+	// impersonation) — used by the Codex OAuth audio-transcription path.
+	minTLSVersion := uint16(0)
+	browserImpersonation := service.UpstreamBrowserImpersonationNone
+	if req != nil {
+		if opts, ok := service.GetUpstreamRequestOptions(req.Context()); ok {
+			minTLSVersion = opts.MinTLSVersion
+			browserImpersonation = opts.BrowserImpersonation
+		}
+	}
+	if browserImpersonation == service.UpstreamBrowserImpersonationChrome {
+		return s.doWithChromeImpersonation(req, proxyURL, minTLSVersion)
+	}
+
 	// 获取或创建对应的客户端，并标记请求占用
-	entry, err := s.acquireClientWithProfile(proxyURL, accountID, accountConcurrency, profile)
+	entry, err := s.acquireClientWithOptions(proxyURL, accountID, accountConcurrency, profile, minTLSVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +209,24 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	})
 
 	return resp, nil
+}
+
+// doWithChromeImpersonation routes the request through the shared
+// browser-impersonating req client. Used when the upstream (notably
+// ChatGPT/Codex audio transcription) materially favours a browser-like
+// TLS+HTTP/2 fingerprint over our standard pool.
+func (s *httpUpstreamService) doWithChromeImpersonation(req *http.Request, proxyURL string, minTLSVersion uint16) (*http.Response, error) {
+	settings := defaultPoolSettings(s.cfg)
+	client, err := getSharedReqClient(reqClientOptions{
+		ProxyURL:              proxyURL,
+		ResponseHeaderTimeout: settings.responseHeaderTimeout,
+		MinTLSVersion:         minTLSVersion,
+		Impersonate:           true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(req)
 }
 
 // DoWithTLS 执行带 TLS 指纹伪装的 HTTP 请求
@@ -386,7 +418,13 @@ func (s *httpUpstreamService) acquireClient(proxyURL string, accountID int64, ac
 
 // acquireClientWithProfile 获取或创建客户端，并按请求 profile 选择协议策略。
 func (s *httpUpstreamService) acquireClientWithProfile(proxyURL string, accountID int64, accountConcurrency int, profile service.HTTPUpstreamProfile) (*upstreamClientEntry, error) {
-	return s.getClientEntry(proxyURL, accountID, accountConcurrency, profile, true, true)
+	return s.acquireClientWithOptions(proxyURL, accountID, accountConcurrency, profile, 0)
+}
+
+// acquireClientWithOptions 获取或创建客户端，并按请求 profile/TLS hint 选择协议策略。
+// minTLSVersion=0 表示使用默认 TLS 配置；非零值会与隔离键合并以避免与默认池混用。
+func (s *httpUpstreamService) acquireClientWithOptions(proxyURL string, accountID int64, accountConcurrency int, profile service.HTTPUpstreamProfile, minTLSVersion uint16) (*upstreamClientEntry, error) {
+	return s.getClientEntry(proxyURL, accountID, accountConcurrency, profile, true, true, minTLSVersion)
 }
 
 // getOrCreateClient 获取或创建客户端
@@ -405,13 +443,14 @@ func (s *httpUpstreamService) acquireClientWithProfile(proxyURL string, accountI
 //   - account: 按账户隔离，同一账户共享客户端（代理变更时重建）
 //   - account_proxy: 按账户+代理组合隔离，最细粒度
 func (s *httpUpstreamService) getOrCreateClient(proxyURL string, accountID int64, accountConcurrency int) (*upstreamClientEntry, error) {
-	return s.getClientEntry(proxyURL, accountID, accountConcurrency, service.HTTPUpstreamProfileDefault, false, false)
+	return s.getClientEntry(proxyURL, accountID, accountConcurrency, service.HTTPUpstreamProfileDefault, false, false, 0)
 }
 
 // getClientEntry 获取或创建客户端条目
 // markInFlight=true 时会标记进行中请求，用于请求路径防止被淘汰
 // enforceLimit=true 时会限制客户端数量，超限且无法淘汰时返回错误
-func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, accountConcurrency int, profile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool) (*upstreamClientEntry, error) {
+// minTLSVersion=0 表示默认 TLS 配置；非零值会与缓存键合并以避免共享池被替换。
+func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, accountConcurrency int, profile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool, minTLSVersion uint16) (*upstreamClientEntry, error) {
 	// 获取隔离模式
 	isolation := s.getIsolationMode()
 	// 标准化代理 URL 并解析
@@ -425,8 +464,14 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	settings = s.applyProfilePoolSettings(settings, profile)
 	// 构建缓存键（根据隔离策略不同）
 	cacheKey := buildCacheKey(isolation, proxyKey, accountID, protocolMode)
+	if minTLSVersion > 0 {
+		cacheKey = fmt.Sprintf("%s|min_tls:%d", cacheKey, minTLSVersion)
+	}
 	// 构建连接池配置键（用于检测配置变更）
 	poolKey := buildPoolKey(settings, protocolMode)
+	if minTLSVersion > 0 {
+		poolKey = fmt.Sprintf("%s|min_tls:%d", poolKey, minTLSVersion)
+	}
 
 	now := time.Now()
 	nowUnix := now.UnixNano()
@@ -469,7 +514,7 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	}
 
 	// 缓存未命中或需要重建，创建新客户端
-	transport, err := buildUpstreamTransport(settings, parsedProxy, protocolMode)
+	transport, err := buildUpstreamTransport(settings, parsedProxy, protocolMode, minTLSVersion)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("build transport: %w", err)
@@ -1049,7 +1094,7 @@ func defaultPoolSettings(cfg *config.Config) poolSettings {
 //   - MaxConnsPerHost: 每主机最大连接数（达到后新请求等待）
 //   - IdleConnTimeout: 空闲连接超时（超时后关闭）
 //   - ResponseHeaderTimeout: 等待响应头超时（不影响流式传输）
-func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMode string) (*http.Transport, error) {
+func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMode string, minTLSVersion uint16) (*http.Transport, error) {
 	transport := &http.Transport{
 		MaxIdleConns:          settings.maxIdleConns,
 		MaxIdleConnsPerHost:   settings.maxIdleConnsPerHost,
@@ -1067,6 +1112,9 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 		// 显式禁用 HTTP/2，确保代理不兼容场景回退到 HTTP/1.1。
 		transport.ForceAttemptHTTP2 = false
 		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	}
+	if minTLSVersion >= tls.VersionTLS13 {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
 	}
 	if err := proxyutil.ConfigureTransportProxy(transport, proxyURL); err != nil {
 		return nil, err

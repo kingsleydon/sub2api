@@ -358,7 +358,7 @@ func TestAdminService_CreateGroup_NormalizesMessagesDispatchModelConfig(t *testi
 	require.NotNil(t, repo.created)
 	require.Equal(t, OpenAIMessagesDispatchModelConfig{
 		OpusMappedModel:   "gpt-5.4",
-		SonnetMappedModel: "gpt-5.3-codex",
+		SonnetMappedModel: "gpt-5.5",
 		HaikuMappedModel:  "gpt-5.4-mini",
 		ExactModelMappings: map[string]string{
 			"claude-sonnet-4-5-20250929": "gpt-5.2",

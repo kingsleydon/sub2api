@@ -4,12 +4,16 @@ import "strings"
 
 const (
 	defaultOpenAIMessagesDispatchOpusMappedModel   = "gpt-5.4"
-	defaultOpenAIMessagesDispatchSonnetMappedModel = "gpt-5.3-codex"
+	defaultOpenAIMessagesDispatchSonnetMappedModel = "gpt-5.5"
 	defaultOpenAIMessagesDispatchHaikuMappedModel  = "gpt-5.4-mini"
 )
 
 func normalizeOpenAIMessagesDispatchMappedModel(model string) string {
 	model = NormalizeOpenAICompatRequestedModel(strings.TrimSpace(model))
+	if model == "" {
+		return ""
+	}
+	model = normalizeCodexModel(model)
 	return strings.TrimSpace(model)
 }
 

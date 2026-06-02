@@ -19,7 +19,7 @@ func TestNormalizeOpenAIMessagesDispatchModelConfig(t *testing.T) {
 	})
 
 	require.Equal(t, "gpt-5.4", cfg.OpusMappedModel)
-	require.Equal(t, "gpt-5.3-codex", cfg.SonnetMappedModel)
+	require.Equal(t, "gpt-5.5", cfg.SonnetMappedModel)
 	require.Equal(t, "gpt-5.4-mini", cfg.HaikuMappedModel)
 	require.Equal(t, map[string]string{
 		"claude-sonnet-4-5-20250929": "gpt-5.2",

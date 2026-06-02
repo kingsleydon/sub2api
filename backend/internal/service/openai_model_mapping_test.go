@@ -221,7 +221,7 @@ func TestNormalizeCodexModel(t *testing.T) {
 		"gpt-5.3-codex-spark":       "gpt-5.3-codex-spark",
 		"gpt-5.3-codex-spark-high":  "gpt-5.3-codex-spark",
 		"gpt-5.3-codex-spark-xhigh": "gpt-5.3-codex-spark",
-		"gpt-5.3":                   "gpt-5.3-codex",
+		"gpt-5.3":                   "gpt-5.5",
 		"gpt-image-2":               "gpt-image-2",
 		"gpt-5.4-nano":              "gpt-5.4-nano",
 		"gpt-5.4-nano-high":         "gpt-5.4-nano",
@@ -268,10 +268,10 @@ func TestNormalizeOpenAIModelForUpstream(t *testing.T) {
 			want:    "codex-auto-review",
 		},
 		{
-			name:    "oauth maps delisted codex 5.1 to 5.3 codex",
+			name:    "oauth maps delisted codex 5.1 to 5.5",
 			account: &Account{Type: AccountTypeOAuth},
 			model:   "gpt-5.1-codex",
-			want:    "gpt-5.3-codex",
+			want:    "gpt-5.5",
 		},
 		{
 			name:    "oauth maps delisted codex 5.1 mini to 5.4 mini",

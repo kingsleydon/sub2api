@@ -1021,6 +1021,10 @@ func logCodexCLIOnlyDetection(ctx context.Context, c *gin.Context, account *Acco
 }
 
 func appendCodexCLIOnlyRejectedRequestFields(fields []zap.Field, c *gin.Context, body []byte) []zap.Field {
+	return appendCodexCLIOnlyRejectedRequestFieldsWithModelField(fields, c, body, "request_model")
+}
+
+func appendCodexCLIOnlyRejectedRequestFieldsWithModelField(fields []zap.Field, c *gin.Context, body []byte, modelField string) []zap.Field {
 	if c == nil || c.Request == nil {
 		return fields
 	}
@@ -1039,8 +1043,8 @@ func appendCodexCLIOnlyRejectedRequestFields(fields []zap.Field, c *gin.Context,
 		zap.Int64("request_content_length", req.ContentLength),
 		zap.Bool("request_stream", requestStream),
 	)
-	if requestModel != "" {
-		fields = append(fields, zap.String("request_model", requestModel))
+	if requestModel != "" && strings.TrimSpace(modelField) != "" {
+		fields = append(fields, zap.String(strings.TrimSpace(modelField), requestModel))
 	}
 	if promptCacheKey != "" {
 		fields = append(fields, zap.String("request_prompt_cache_key_sha256", hashSensitiveValueForLog(promptCacheKey)))
@@ -3292,11 +3296,13 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	payloadTransformEnabled := s.isOpenAIResponsesPayloadTransformEnabled()
 	upstreamPassthroughModel := ""
 	upstreamModelForValidation := reqModel
+	instructionsValidationModels := []string{reqModel}
 	if account != nil {
 		mappedModel, matched := account.ResolveMappedModel(reqModel)
 		if matched {
 			mappedModel = strings.TrimSpace(mappedModel)
 			if mappedModel != "" && mappedModel != reqModel {
+				instructionsValidationModels = append(instructionsValidationModels, mappedModel)
 				nextBody, setErr := sjson.SetBytes(body, "model", mappedModel)
 				if setErr != nil {
 					return nil, fmt.Errorf("set passthrough model mapping: %w", setErr)
@@ -3308,6 +3314,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 		normalizedModel := normalizeOpenAIModelForUpstream(account, upstreamModelForValidation)
 		if normalizedModel != "" && normalizedModel != upstreamModelForValidation {
+			instructionsValidationModels = append(instructionsValidationModels, normalizedModel)
 			nextBody, setErr := sjson.SetBytes(body, "model", normalizedModel)
 			if setErr != nil {
 				return nil, fmt.Errorf("set passthrough upstream model: %w", setErr)
@@ -3320,6 +3327,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	if isOpenAIResponsesCompactPath(c) {
 		compactMappedModel := resolveOpenAICompactForwardModel(account, upstreamModelForValidation)
 		if compactMappedModel != "" && compactMappedModel != upstreamModelForValidation {
+			instructionsValidationModels = append(instructionsValidationModels, compactMappedModel)
 			nextBody, setErr := sjson.SetBytes(body, "model", compactMappedModel)
 			if setErr != nil {
 				return nil, fmt.Errorf("set compact passthrough model: %w", setErr)
@@ -3330,7 +3338,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	}
 
 	if account != nil && account.Type == AccountTypeOAuth {
-		if rejectReason := detectOpenAIPassthroughInstructionsRejectReason(upstreamModelForValidation, body); rejectReason != "" {
+		if rejectReason := detectOpenAIPassthroughInstructionsRejectReason(body, instructionsValidationModels...); rejectReason != "" {
 			rejectMsg := "OpenAI codex passthrough requires a non-empty instructions field"
 			MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
 			logOpenAIPassthroughInstructionsRejected(ctx, c, account, reqModel, rejectReason, body)
@@ -3579,7 +3587,7 @@ func logOpenAIPassthroughInstructionsRejected(
 		zap.String("request_model", strings.TrimSpace(reqModel)),
 		zap.String("reject_reason", strings.TrimSpace(rejectReason)),
 	}
-	fields = appendCodexCLIOnlyRejectedRequestFields(fields, c, body)
+	fields = appendCodexCLIOnlyRejectedRequestFieldsWithModelField(fields, c, body, "request_body_model")
 	logger.FromContext(ctx).With(fields...).Warn("OpenAI passthrough 本地拦截：Codex 请求缺少有效 instructions")
 }
 
@@ -6639,9 +6647,8 @@ func normalizeOpenAIPassthroughOAuthBody(body []byte, compact bool) ([]byte, boo
 	return normalized, changed, nil
 }
 
-func detectOpenAIPassthroughInstructionsRejectReason(reqModel string, body []byte) string {
-	model := strings.ToLower(strings.TrimSpace(reqModel))
-	if !strings.Contains(model, "codex") {
+func detectOpenAIPassthroughInstructionsRejectReason(body []byte, models ...string) string {
+	if !requiresOpenAIPassthroughCodexInstructions(models...) {
 		return ""
 	}
 
@@ -6656,6 +6663,50 @@ func detectOpenAIPassthroughInstructionsRejectReason(reqModel string, body []byt
 		return "instructions_empty"
 	}
 	return ""
+}
+
+func requiresOpenAIPassthroughCodexInstructions(models ...string) bool {
+	for _, model := range models {
+		if isOpenAIPassthroughCodexInstructionsModel(model) {
+			return true
+		}
+	}
+	return false
+}
+
+func isOpenAIPassthroughCodexInstructionsModel(model string) bool {
+	normalized := canonicalizeOpenAIModelAliasSpelling(model)
+	if normalized == "" {
+		return false
+	}
+	normalized = strings.TrimSuffix(normalized, "-openai-compact")
+
+	switch {
+	case strings.Contains(normalized, "gpt-5.1-codex-mini"):
+		return false
+	case strings.Contains(normalized, "gpt-5.1-codex"):
+		return true
+	case strings.Contains(normalized, "gpt-5.5"):
+		return false
+	case strings.Contains(normalized, "gpt-5.4-mini"):
+		return false
+	case strings.Contains(normalized, "gpt-5.4-nano"):
+		return false
+	case strings.Contains(normalized, "gpt-5.4"):
+		return false
+	case strings.Contains(normalized, "gpt-5.2"):
+		return false
+	case strings.Contains(normalized, "gpt-5.3-codex-spark"):
+		return true
+	case strings.Contains(normalized, "gpt-5.3-codex"):
+		return true
+	case strings.Contains(normalized, "gpt-5.3"):
+		return true
+	case strings.Contains(normalized, "codex"):
+		return true
+	default:
+		return false
+	}
 }
 
 func extractOpenAIReasoningEffortFromBody(body []byte, requestedModel string) *string {

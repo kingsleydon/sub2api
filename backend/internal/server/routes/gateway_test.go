@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -86,14 +87,14 @@ func TestShouldRouteToOpenAI_PreservesGroupedPlatformRouting(t *testing.T) {
 		Group:   &service.Group{Platform: service.PlatformAnthropic},
 	}, `{"model":"gpt-5.5"}`)
 
-	require.False(t, shouldRouteToOpenAI(c, legacyOpenAIByModel))
+	require.False(t, shouldRouteToOpenAI(c, legacyOpenAIByModel, nil))
 
 	c = newRouteDecisionContext(t, &service.APIKey{
 		GroupID: &groupID,
 		Group:   &service.Group{Platform: service.PlatformOpenAI},
 	}, `{"model":"kimi-for-coding"}`)
 
-	require.True(t, shouldRouteToOpenAI(c, legacyOpenAIByModel))
+	require.True(t, shouldRouteToOpenAI(c, legacyOpenAIByModel, nil))
 }
 
 func TestShouldRouteToOpenAI_LegacyUngroupedKeyRoutesByModel(t *testing.T) {
@@ -138,13 +139,39 @@ func TestShouldRouteToOpenAI_LegacyUngroupedKeyRoutesByModel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := newRouteDecisionContext(t, &service.APIKey{}, tt.body)
-			require.Equal(t, tt.want, shouldRouteToOpenAI(c, tt.mode))
+			require.Equal(t, tt.want, shouldRouteToOpenAI(c, tt.mode, nil))
 
 			got, err := io.ReadAll(c.Request.Body)
 			require.NoError(t, err)
 			require.Equal(t, tt.body, string(got), "route decision must not consume request body")
 		})
 	}
+}
+
+func TestShouldRouteToOpenAI_LegacyUngroupedKeyUsesAvailableOpenAIModel(t *testing.T) {
+	modelAvailable := func(_ context.Context, model string) bool {
+		return model == "z-ai/glm-5.2" || model == "kimi-for-coding-highspeed"
+	}
+
+	for _, model := range []string{"z-ai/glm-5.2", "kimi-for-coding-highspeed"} {
+		c := newRouteDecisionContext(t, &service.APIKey{}, `{"model":"`+model+`"}`)
+		require.True(t, shouldRouteToOpenAI(c, legacyOpenAIByModel, modelAvailable), model)
+	}
+
+	c := newRouteDecisionContext(t, &service.APIKey{}, `{"model":"claude-sonnet-4-5"}`)
+	require.False(t, shouldRouteToOpenAI(c, legacyOpenAIByModel, modelAvailable))
+}
+
+func TestShouldRouteToOpenAI_GroupedRoutingIgnoresUngroupedAvailability(t *testing.T) {
+	groupID := int64(1)
+	c := newRouteDecisionContext(t, &service.APIKey{
+		GroupID: &groupID,
+		Group:   &service.Group{Platform: service.PlatformAnthropic},
+	}, `{"model":"z-ai/glm-5.2"}`)
+
+	require.False(t, shouldRouteToOpenAI(c, legacyOpenAIByModel, func(context.Context, string) bool {
+		return true
+	}))
 }
 
 func newRouteDecisionContext(t *testing.T, apiKey *service.APIKey, body string) *gin.Context {

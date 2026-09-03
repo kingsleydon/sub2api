@@ -9977,6 +9977,21 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 	return cloneStringSlice(models)
 }
 
+// HasAvailableModel reports whether the cached schedulable account catalog
+// contains a model for the requested platform.
+func (s *GatewayService) HasAvailableModel(ctx context.Context, groupID *int64, platform, model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	for _, pattern := range s.GetAvailableModels(ctx, groupID, platform) {
+		if matchWildcard(pattern, model) {
+			return true
+		}
+	}
+	return false
+}
+
 func defaultModelIDsForPlatform(platform string) []string {
 	switch platform {
 	case PlatformOpenAI:

@@ -2,6 +2,7 @@ package routes
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -34,6 +35,9 @@ func RegisterGatewayRoutes(
 	// 未分组 Key 拦截中间件（按协议格式区分错误响应）
 	requireGroupAnthropic := middleware.RequireGroupAssignment(settingService, middleware.AnthropicErrorWriter)
 	requireGroupGoogle := middleware.RequireGroupAssignment(settingService, middleware.GoogleErrorWriter)
+	legacyOpenAIModelAvailable := func(ctx context.Context, model string) bool {
+		return h != nil && h.Gateway != nil && h.Gateway.HasAvailableUngroupedModel(ctx, service.PlatformOpenAI, model)
+	}
 
 	// API网关（Claude API兼容）
 	gateway := r.Group("/v1")
@@ -71,14 +75,14 @@ func RegisterGatewayRoutes(
 		gateway.GET("/usage", h.Gateway.Usage)
 		// OpenAI Responses API: auto-route based on group platform
 		gateway.POST("/responses", func(c *gin.Context) {
-			if shouldRouteToOpenAI(c, legacyOpenAIByModel) {
+			if shouldRouteToOpenAI(c, legacyOpenAIByModel, legacyOpenAIModelAvailable) {
 				h.OpenAIGateway.Responses(c)
 				return
 			}
 			h.Gateway.Responses(c)
 		})
 		gateway.POST("/responses/*subpath", func(c *gin.Context) {
-			if shouldRouteToOpenAI(c, legacyOpenAIByModel) {
+			if shouldRouteToOpenAI(c, legacyOpenAIByModel, legacyOpenAIModelAvailable) {
 				h.OpenAIGateway.Responses(c)
 				return
 			}
@@ -87,7 +91,7 @@ func RegisterGatewayRoutes(
 		gateway.GET("/responses", h.OpenAIGateway.ResponsesWebSocket)
 		// Pi codex-responses provider hits /v1/codex/responses.
 		gateway.POST("/codex/responses", func(c *gin.Context) {
-			if shouldRouteToOpenAI(c, legacyOpenAIAlways) {
+			if shouldRouteToOpenAI(c, legacyOpenAIAlways, legacyOpenAIModelAvailable) {
 				h.OpenAIGateway.Responses(c)
 				return
 			}
@@ -95,14 +99,14 @@ func RegisterGatewayRoutes(
 		})
 		// OpenAI Chat Completions API: auto-route based on group platform
 		gateway.POST("/chat/completions", func(c *gin.Context) {
-			if shouldRouteToOpenAI(c, legacyOpenAIByModel) {
+			if shouldRouteToOpenAI(c, legacyOpenAIByModel, legacyOpenAIModelAvailable) {
 				h.OpenAIGateway.ChatCompletions(c)
 				return
 			}
 			h.Gateway.ChatCompletions(c)
 		})
 		gateway.POST("/embeddings", func(c *gin.Context) {
-			if !shouldRouteToOpenAI(c, legacyOpenAIAlways) {
+			if !shouldRouteToOpenAI(c, legacyOpenAIAlways, legacyOpenAIModelAvailable) {
 				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 				c.JSON(http.StatusNotFound, gin.H{
 					"error": gin.H{
@@ -115,7 +119,7 @@ func RegisterGatewayRoutes(
 			h.OpenAIGateway.Embeddings(c)
 		})
 		gateway.POST("/images/generations", func(c *gin.Context) {
-			if !shouldRouteToOpenAI(c, legacyOpenAIAlways) {
+			if !shouldRouteToOpenAI(c, legacyOpenAIAlways, legacyOpenAIModelAvailable) {
 				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 				c.JSON(http.StatusNotFound, gin.H{
 					"error": gin.H{
@@ -128,7 +132,7 @@ func RegisterGatewayRoutes(
 			h.OpenAIGateway.Images(c)
 		})
 		gateway.POST("/images/edits", func(c *gin.Context) {
-			if !shouldRouteToOpenAI(c, legacyOpenAIAlways) {
+			if !shouldRouteToOpenAI(c, legacyOpenAIAlways, legacyOpenAIModelAvailable) {
 				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 				c.JSON(http.StatusNotFound, gin.H{
 					"error": gin.H{
@@ -142,7 +146,7 @@ func RegisterGatewayRoutes(
 		})
 		// OpenAI Audio Transcriptions API (Codex OAuth backed).
 		gateway.POST("/audio/transcriptions", func(c *gin.Context) {
-			if !shouldRouteToOpenAI(c, legacyOpenAIAlways) {
+			if !shouldRouteToOpenAI(c, legacyOpenAIAlways, legacyOpenAIModelAvailable) {
 				c.JSON(http.StatusNotFound, gin.H{
 					"error": gin.H{
 						"type":    "not_found_error",
@@ -172,7 +176,7 @@ func RegisterGatewayRoutes(
 
 	// OpenAI Responses API（不带v1前缀的别名）— auto-route based on group platform
 	responsesHandler := func(c *gin.Context) {
-		if shouldRouteToOpenAI(c, legacyOpenAIByModel) {
+		if shouldRouteToOpenAI(c, legacyOpenAIByModel, legacyOpenAIModelAvailable) {
 			h.OpenAIGateway.Responses(c)
 			return
 		}
@@ -190,14 +194,14 @@ func RegisterGatewayRoutes(
 	}
 	// OpenAI Chat Completions API（不带v1前缀的别名）— auto-route based on group platform
 	r.POST("/chat/completions", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, func(c *gin.Context) {
-		if shouldRouteToOpenAI(c, legacyOpenAIByModel) {
+		if shouldRouteToOpenAI(c, legacyOpenAIByModel, legacyOpenAIModelAvailable) {
 			h.OpenAIGateway.ChatCompletions(c)
 			return
 		}
 		h.Gateway.ChatCompletions(c)
 	})
 	r.POST("/embeddings", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, func(c *gin.Context) {
-		if !shouldRouteToOpenAI(c, legacyOpenAIAlways) {
+		if !shouldRouteToOpenAI(c, legacyOpenAIAlways, legacyOpenAIModelAvailable) {
 			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 			c.JSON(http.StatusNotFound, gin.H{
 				"error": gin.H{
@@ -210,7 +214,7 @@ func RegisterGatewayRoutes(
 		h.OpenAIGateway.Embeddings(c)
 	})
 	r.POST("/images/generations", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, func(c *gin.Context) {
-		if !shouldRouteToOpenAI(c, legacyOpenAIAlways) {
+		if !shouldRouteToOpenAI(c, legacyOpenAIAlways, legacyOpenAIModelAvailable) {
 			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 			c.JSON(http.StatusNotFound, gin.H{
 				"error": gin.H{
@@ -223,7 +227,7 @@ func RegisterGatewayRoutes(
 		h.OpenAIGateway.Images(c)
 	})
 	r.POST("/images/edits", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, func(c *gin.Context) {
-		if !shouldRouteToOpenAI(c, legacyOpenAIAlways) {
+		if !shouldRouteToOpenAI(c, legacyOpenAIAlways, legacyOpenAIModelAvailable) {
 			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 			c.JSON(http.StatusNotFound, gin.H{
 				"error": gin.H{
@@ -236,7 +240,7 @@ func RegisterGatewayRoutes(
 		h.OpenAIGateway.Images(c)
 	})
 	r.POST("/audio/transcriptions", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, func(c *gin.Context) {
-		if !shouldRouteToOpenAI(c, legacyOpenAIAlways) {
+		if !shouldRouteToOpenAI(c, legacyOpenAIAlways, legacyOpenAIModelAvailable) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"error": gin.H{
 					"type":    "not_found_error",
@@ -294,6 +298,8 @@ func getGroupPlatform(c *gin.Context) string {
 
 type legacyOpenAICompatMode int
 
+type legacyOpenAIModelAvailability func(context.Context, string) bool
+
 const (
 	legacyOpenAINone legacyOpenAICompatMode = iota
 	legacyOpenAIByModel
@@ -303,7 +309,11 @@ const (
 // shouldRouteToOpenAI keeps upstream's group/platform routing intact for
 // grouped keys. It only restores our legacy ungrouped-key behavior after
 // RequireGroupAssignment has explicitly allowed ungrouped scheduling.
-func shouldRouteToOpenAI(c *gin.Context, legacyMode legacyOpenAICompatMode) bool {
+func shouldRouteToOpenAI(
+	c *gin.Context,
+	legacyMode legacyOpenAICompatMode,
+	modelAvailable legacyOpenAIModelAvailability,
+) bool {
 	apiKey, ok := middleware.GetAPIKeyFromContext(c)
 	if !ok || apiKey == nil {
 		return false
@@ -318,7 +328,11 @@ func shouldRouteToOpenAI(c *gin.Context, legacyMode legacyOpenAICompatMode) bool
 	case legacyOpenAIAlways:
 		return true
 	case legacyOpenAIByModel:
-		return isLegacyOpenAIModel(peekRequestModel(c))
+		model := peekRequestModel(c)
+		if isLegacyOpenAIModel(model) {
+			return true
+		}
+		return modelAvailable != nil && modelAvailable(c.Request.Context(), model)
 	default:
 		return false
 	}

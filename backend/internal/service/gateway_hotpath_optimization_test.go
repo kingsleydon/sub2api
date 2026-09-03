@@ -580,6 +580,43 @@ func TestGetAvailableModels_ErrorAndGlobalListBranches(t *testing.T) {
 	require.Equal(t, int64(1), okRepo.listAllCalls.Load())
 }
 
+func TestHasAvailableModel_UsesPlatformScopedMappedCatalog(t *testing.T) {
+	repo := &modelsListAccountRepoStub{
+		all: []Account{
+			{
+				ID:       1,
+				Platform: PlatformOpenAI,
+				Credentials: map[string]any{
+					"model_mapping": map[string]any{
+						"z-ai/glm-5.2": "z-ai/glm-5.2",
+						"kimi-*":       "kimi-for-coding",
+					},
+				},
+			},
+			{
+				ID:       2,
+				Platform: PlatformAnthropic,
+				Credentials: map[string]any{
+					"model_mapping": map[string]any{
+						"claude-sonnet-4-5": "claude-sonnet-4-5",
+					},
+				},
+			},
+		},
+	}
+	svc := &GatewayService{
+		accountRepo:        repo,
+		modelsListCache:    gocache.New(time.Minute, time.Minute),
+		modelsListCacheTTL: time.Minute,
+	}
+
+	require.True(t, svc.HasAvailableModel(context.Background(), nil, PlatformOpenAI, "z-ai/glm-5.2"))
+	require.True(t, svc.HasAvailableModel(context.Background(), nil, PlatformOpenAI, "kimi-for-coding-highspeed"))
+	require.False(t, svc.HasAvailableModel(context.Background(), nil, PlatformOpenAI, "claude-sonnet-4-5"))
+	require.False(t, svc.HasAvailableModel(context.Background(), nil, PlatformOpenAI, ""))
+	require.Equal(t, int64(1), repo.listAllCalls.Load())
+}
+
 func TestGetAvailableModels_MergesMappedAndUnmappedPlatformDefaults(t *testing.T) {
 	resetGatewayHotpathStatsForTest()
 

@@ -1022,6 +1022,12 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	})
 }
 
+// HasAvailableUngroupedModel exposes the gateway's cached model catalog to the
+// legacy ungrouped route selector without leaking repository details.
+func (h *GatewayHandler) HasAvailableUngroupedModel(ctx context.Context, platform, model string) bool {
+	return h != nil && h.gatewayService != nil && h.gatewayService.HasAvailableModel(ctx, nil, platform, model)
+}
+
 func writeModelsList(c *gin.Context, modelIDs []string) {
 	models := make([]claude.Model, 0, len(modelIDs))
 	for _, modelID := range modelIDs {
